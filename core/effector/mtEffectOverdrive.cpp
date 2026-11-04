@@ -94,8 +94,14 @@ int32_t mtEffectOverdrive::processBlock()
                     const float in = (float)*channelParams[channel].srcAddr / INT16_MAX;
                     const float inSign = in >= 0 ? 1 : -1;
 
+#ifdef FW_TRIM
+                    // float expf instead of double exp (flash trim)
+                    outVal =
+                      (inSign * ((float)M_E - expf(1.0f - gainNorm * in * inSign)) / (float)M_E) * INT16_MAX;
+#else
                     outVal =
                       (inSign * (M_E - exp(1.0f - gainNorm * in * inSign)) / M_E) * INT16_MAX;
+#endif
                     break;
                 }
                 case RECIPROCAL:

@@ -8,6 +8,9 @@
 #include "Synth.h"
 #include "config.h"
 #include <span>
+#ifdef FEATURE_SYNTH_OPEN
+#include "open_load.h"
+#endif
 //#include "Audio.h"
 //#include "dspinst.h'
 //#include "util_math.h"
@@ -53,6 +56,16 @@ AUDIO_CORE_RAM void PolySynth::update(void)
             release(blockZero);
             continue;
         }
+
+#ifdef FEATURE_SYNTH_OPEN
+        // A part with voices allowed but nothing sounding (the default: 1 voice per part) used to render, soft clip and
+        // send blocks of zeros through its amplifiers, analysers and mixers every block. Transmit nothing: a missing
+        // block is silence downstream. Offline render keeps the full path (stems are written block by block).
+        if (!AudioStream::renderMode && polysynth::open::partIdle(partIdx))
+        {
+            continue;
+        }
+#endif
 
         bool isStereo =
           part.patch != nullptr && part.patch->getMetadata().outputChannels ==

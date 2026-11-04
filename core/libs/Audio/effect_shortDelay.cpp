@@ -1,4 +1,5 @@
 #include "effect_shortDelay.h"
+#include <algorithm>
 #include "Audio.h"
 #include "mtSequencer.h"
 #include "utility/dspinst.h"
@@ -117,6 +118,9 @@ AUDIO_CORE_FLASH void AudioEffectShortDelay::clear()
     lastFilterOutRight = 0;
     lastFilterOutMono = 0;
     silentSamplesCount = MAX_DELAYLINE_LENGTH;
+#ifdef AUDIO_NULL_IS_SILENCE
+    quietSamplesCount = MAX_DELAYLINE_LENGTH;
+#endif
 
     memset(pingpongDelaylineRight, 0, MAX_DELAYLINE_LENGTH * sizeof(int16_t));
     memset(pingpongDelaylineLeft, 0, MAX_DELAYLINE_LENGTH * sizeof(int16_t));
@@ -134,6 +138,21 @@ AUDIO_CORE_FLASH void AudioEffectShortDelay::unblockUpdate()
     noRefresh = false;
 }
 
+#ifdef AUDIO_NULL_IS_SILENCE
+static bool isZeroOrMissing(const audio_block_t* block)
+{
+    if (block == nullptr)
+        return true;
+    const uint32_t* p = (const uint32_t*)block->data;
+    for (int i = 0; i < AUDIO_BLOCK_SAMPLES / 2; i++)
+    {
+        if (p[i] != 0)
+            return false;
+    }
+    return true;
+}
+#endif
+
 AUDIO_CORE_RAM void AudioEffectShortDelay::update(void)
 {
     audio_block_t* input;
@@ -141,6 +160,30 @@ AUDIO_CORE_RAM void AudioEffectShortDelay::update(void)
     audio_block_t* outputRight;
 
     input = receiveReadOnly(0);
+#ifdef AUDIO_NULL_IS_SILENCE
+    const bool silentInput = isZeroOrMissing(input);
+    if (!noRefresh && timeInSamples >= 1 && quietSamplesCount >= timeInSamples &&
+        (lastFilterInRight | lastFilterInLeft | lastFilterInMono | lastFilterOutRight | lastFilterOutLeft | lastFilterOutMono) == 0 &&
+        silentInput)
+    {
+        // Silent input, the last timeInSamples values written to the lines were zero (so the whole delay window is) and the filters are
+        // at rest: delayed samples, filter outputs and the values to write are zero, as in every one of the 128 steps of process().
+        // What process() would do is write 128 zeros to each line, move the head and count 128 silent samples. Same state, same output
+        // (zero, so nothing is transmitted).
+        const uint32_t headSampleIdx = headIdx & delaylineLengthMask; // a multiple of 128, the block never wraps
+        memset(&pingpongDelaylineRight[headSampleIdx], 0, AUDIO_BLOCK_SAMPLES * sizeof(int16_t));
+        memset(&pingpongDelaylineLeft[headSampleIdx], 0, AUDIO_BLOCK_SAMPLES * sizeof(int16_t));
+        memset(&monoDelayline[headSampleIdx], 0, AUDIO_BLOCK_SAMPLES * sizeof(int16_t));
+        headIdx += AUDIO_BLOCK_SAMPLES;
+        silentSamplesCount = std::min<uint32_t>(silentSamplesCount + AUDIO_BLOCK_SAMPLES, MAX_DELAYLINE_LENGTH);
+        quietSamplesCount = std::min<uint32_t>(quietSamplesCount + AUDIO_BLOCK_SAMPLES, MAX_DELAYLINE_LENGTH);
+        if (input != nullptr)
+        {
+            release(input);
+        }
+        return;
+    }
+#endif
     outputLeft = allocate();
     outputRight = allocate();
 
@@ -148,10 +191,17 @@ AUDIO_CORE_RAM void AudioEffectShortDelay::update(void)
 
     if (outputLeft != nullptr && outputRight != nullptr)
     {
+#ifdef AUDIO_NULL_IS_SILENCE
+        int16_t* const inputData = input != nullptr ? input->data : zeroblock;
+        processed = silentInput
+                      ? processBlock<true>(inputData, outputLeft->data, outputRight->data, AUDIO_BLOCK_SAMPLES)
+                      : processBlock<false>(inputData, outputLeft->data, outputRight->data, AUDIO_BLOCK_SAMPLES);
+#else
         processed = process(input != nullptr ? input->data : zeroblock,
                             outputLeft->data,
                             outputRight->data,
                             AUDIO_BLOCK_SAMPLES);
+#endif
     }
 
     if (outputRight != nullptr)
@@ -176,10 +226,26 @@ AUDIO_CORE_RAM void AudioEffectShortDelay::update(void)
     }
 }
 
+#ifdef AUDIO_NULL_IS_SILENCE
 AUDIO_CORE_RAM bool AudioEffectShortDelay::process(int16_t input[],
                                                int16_t outputLeft[],
                                                int16_t outputRight[],
                                                int sampleCount)
+{
+    return processBlock<false>(input, outputLeft, outputRight, sampleCount);
+}
+
+template<bool kTrackQuiet>
+AUDIO_CORE_RAM bool AudioEffectShortDelay::processBlock(int16_t input[],
+                                                    int16_t outputLeft[],
+                                                    int16_t outputRight[],
+                                                    int sampleCount)
+#else
+AUDIO_CORE_RAM bool AudioEffectShortDelay::process(int16_t input[],
+                                               int16_t outputLeft[],
+                                               int16_t outputRight[],
+                                               int sampleCount)
+#endif
 {
     if (noRefresh == true)
     {
@@ -189,6 +255,9 @@ AUDIO_CORE_RAM bool AudioEffectShortDelay::process(int16_t input[],
     int32_t newDelayedSampleLeft = 0;
     int32_t newDelayedSampleRight = 0;
     int32_t newDelayedSampleMono = 0;
+#ifdef AUDIO_NULL_IS_SILENCE
+    int32_t anyNonZero = 0;
+#endif
 
     for (int sample = 0; sample < sampleCount; sample++)
     {
@@ -242,6 +311,12 @@ AUDIO_CORE_RAM bool AudioEffectShortDelay::process(int16_t input[],
           16,
           kFeedbackShift);
 
+#ifdef AUDIO_NULL_IS_SILENCE
+        if constexpr (kTrackQuiet)
+        {
+            anyNonZero |= saturatedLeft | saturatedRight | saturatedMono;
+        }
+#endif
         bool isSampleSilent =
           isPingpong ? (outL == 0 && outR == 0 && saturatedLeft == 0 && saturatedRight == 0)
                      : (outL == 0 && saturatedMono == 0);
@@ -263,6 +338,17 @@ AUDIO_CORE_RAM bool AudioEffectShortDelay::process(int16_t input[],
         pingpongDelaylineRight[headSampleIdx] = saturatedRight;
         monoDelayline[headSampleIdx] = saturatedMono;
     }
+#ifdef AUDIO_NULL_IS_SILENCE
+    if constexpr (kTrackQuiet)
+    {
+        quietSamplesCount =
+          anyNonZero == 0 ? std::min<uint32_t>(quietSamplesCount + sampleCount, MAX_DELAYLINE_LENGTH) : 0;
+    }
+    else
+    {
+        quietSamplesCount = 0;
+    }
+#endif
 
     return true;
 }

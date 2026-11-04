@@ -5,6 +5,7 @@ agt/
 /build/
 core/build-*/
 platforms/mk66/build/
+platforms/mk66/build-trim/
 platforms/imx/build-*/
 editor-fx-sdk/build/
 *.axf
@@ -26,3 +27,6 @@ __pycache__/
 .vscode/
 .idea/
 .DS_Store
+
+# Pinned test builds (binaries stay out of git)
+releases/

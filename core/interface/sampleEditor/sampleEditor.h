@@ -2,6 +2,9 @@
 #define INTERFACE_SAMPLEEDITOR_H_
 
 #include "core/modulesBase.h"
+
+#include <algorithm>
+#include <iterator>
 #include "mtSampleEditorEngine.h"
 #include "mtStructs.h"
 #include "tracker_plugin.h"
@@ -350,8 +353,8 @@ class cSampleEditor : public ModuleBase
     //*******************
     cSampleEditor()
     {
-        label[8] = { -1 };
-        bar[8] = { -1 };
+        std::fill(std::begin(label), std::end(label), -1);
+        std::fill(std::begin(bar), std::end(bar), -1);
         for (int i = 0; i < kEffectPageParams; i++)
         {
             paramList[i] = -1;

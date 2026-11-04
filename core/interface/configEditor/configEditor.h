@@ -3,6 +3,9 @@
 
 #include "core/modulesBase.h"
 
+#include <algorithm>
+#include <iterator>
+
 #include "mtStructs.h"
 
 #include "configEditor/configMenuDefs.h"
@@ -32,7 +35,7 @@ class cConfigEditor : public ModuleBase
 
     cConfigEditor()
     {
-        label[8] = { -1 };
+        std::fill(std::begin(label), std::end(label), -1);
         editorInstrument = nullptr;
         frameControl = -1;
         popoutWindowLabel = -1;

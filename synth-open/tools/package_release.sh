@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Package a tracker-ff (synth-open) firmware image with the license texts that must travel with it.
+#   synth-open/tools/package_release.sh <image.ptf> [out_dir] [--zip]
+# Makes <out_dir>/<image name without .ptf>/ (default out_dir: build/release) with
+#   the .ptf, LICENSE, NOTICE.md, README-RELEASE.txt, SHA256SUMS and licenses/ (one text per bundled third-party component).
+# Texts that exist only as source file headers (FastCRC, Polyverb, FatFs, PJRC Teensy core and audio library) are copied out
+# of those headers verbatim (the leading comment block of the file). Never includes factory patches or .ptfx plugins.
+# With --zip the folder is also zipped next to itself (<name>.zip, needs zip).
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ptf=""; out="$root/build/release"; zip=0
+for a in "$@"; do
+  case "$a" in
+    --zip) zip=1 ;;
+    *) if [ -z "$ptf" ]; then ptf="$a"; else out="$a"; fi ;;
+  esac
+done
+[ -n "$ptf" ] && [ -f "$ptf" ] || { echo "usage: $0 <image.ptf> [out_dir] [--zip]" >&2; exit 2; }
+case "$(basename "$ptf")" in *.ptf) ;; *) echo "not a .ptf: $ptf" >&2; exit 2 ;; esac
+
+name="$(basename "$ptf" .ptf)"
+dest="$out/$name"
+rm -rf "$dest"
+mkdir -p "$dest/licenses"
+
+cp "$ptf" "$dest/"
+cp "$root/LICENSE" "$root/NOTICE.md" "$dest/"
+
+# Full license texts that are files in the repository
+copy() { cp "$root/$1" "$dest/licenses/$2" || { echo "missing license file $1" >&2; exit 1; }; }
+copy licenses/LICENSE-OpenTracker-Apache-2.0.txt     LICENSE-OpenTracker-Apache-2.0.txt
+copy licenses/LICENSE-OpenTracker-synths-MIT.txt      LICENSE-OpenTracker-synths-MIT.txt
+copy licenses/LICENSE-BSD-3-Clause-NXP.txt          LICENSE-BSD-3-Clause-NXP.txt
+copy licenses/LICENSE-LiberationFonts-OFL-1.1.txt   LICENSE-LiberationFonts-OFL-1.1.txt
+copy util/3rdparty/fmt/LICENSE.rst                  LICENSE-fmt-MIT.txt
+copy util/3rdparty/nanopb/LICENSE.txt               LICENSE-nanopb-zlib.txt
+copy util/3rdparty/tiny/LICENSE                     LICENSE-tiny-BSL-1.0.txt
+copy util/3rdparty/constexpr-string/LICENSE         LICENSE-constexpr-string-MIT.txt
+
+# License texts that exist only as the leading comment block of a source file: copy that block verbatim.
+# Block comment (/* ... */) or run of // lines, stops at the first line that is neither.
+header() { # <repo path> <out name> <title>
+  local src="$root/$1" outf="$dest/licenses/$2"
+  [ -f "$src" ] || { echo "missing source $1" >&2; exit 1; }
+  {
+    echo "$3"
+    echo "Verbatim from the header of $1"
+    echo "----------------------------------------------------------------------"
+    awk '
+      { sub(/\r$/, "") }
+      NR==1 && /^[[:space:]]*\/\*/ { blk=1 }
+      NR==1 && /^[[:space:]]*\/\// { lin=1 }
+      blk { print; if ($0 ~ /\*\//) exit; next }
+      lin { if ($0 ~ /^[[:space:]]*\/\//) { print; next } else exit }
+      { exit }' "$src"
+  } > "$outf"
+  [ "$(wc -l < "$outf")" -gt 12 ] || { echo "no license header found in $1" >&2; exit 1; }
+  grep -qi 'permission\|redistribution' "$outf" || { echo "header of $1 has no license text" >&2; exit 1; }
+}
+header platforms/mk66/3rdparty/FastCRC/FastCRC.h           LICENSE-FastCRC-MIT.txt            "FastCRC (Frank Boesing), MIT"
+header core/libs/Audio/Polyverb/reverb.h                    LICENSE-Polyverb-MutableInstruments-MIT.txt "Polyverb, from Mutable Instruments (Emilie Gillet), MIT"
+header platforms/mk66/3rdparty/SD/fatfs/source/ff.c         LICENSE-FatFs-ChaN.txt             "FatFs (ChaN), BSD-style license"
+header platforms/mk66/3rdparty/teensy_core/pins_teensy.c    LICENSE-PJRC-TeensyCore.txt        "Teensyduino core (PJRC.COM, LLC), MIT with the PJRC device-list condition"
+header platforms/mk66/3rdparty/Audio/input_i2s.h            LICENSE-PJRC-AudioLibrary-MIT.txt  "Teensy Audio Library (Paul Stoffregen, PJRC.COM, LLC), MIT"
+
+# Where to find the source of this build
+rev="$(git -C "$root" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+cat > "$dest/README-RELEASE.txt" <<EOF
+tracker-ff  ($name)
+Unofficial community firmware for the original Polyend Tracker (MK66), a fork of Polyend's Tracker Community Edition with 17 open synth engines.
+Not affiliated with, endorsed by or supported by Polyend. Free, non-commercial.
+Built from commit $rev of https://github.com/sbialy/tracker-ff (fork of https://github.com/polyend/tracker-ce).
+
+LICENSE       the repository license (MIT with the Wholesale Commercial Clone Restriction): free to share, not to sell
+NOTICE.md     third-party notices and attributions
+licenses/     the full license text of every bundled third-party component (OpenTracker Apache-2.0, opentracker-synths MIT, ...)
+
+This image links neither libPolySynth.a nor libPolyDSP.a. Factory patches and .ptfx plugins are not part of this package.
+Copy only the .ptf to the SD card (Config > Firmware). The file name must stay as it is.
+EOF
+
+( cd "$dest" && find . -type f ! -name SHA256SUMS | sort | sed 's|^\./||' | while read -r f; do shasum -a 256 "$f"; done > SHA256SUMS )
+
+if [ "$zip" = 1 ]; then
+  ( cd "$out" && rm -f "$name.zip" && zip -qr "$name.zip" "$name" )
+  echo "zip:    $out/$name.zip"
+fi
+echo "folder: $dest"
+find "$dest" -type f | sort | sed "s|^$dest/|  |"

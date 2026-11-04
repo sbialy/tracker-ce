@@ -24,6 +24,9 @@ AUDIO_CORE_FLASH void AudioEffectLimiter::setThreshold(uint16_t ts)
 }
 AUDIO_CORE_FLASH void AudioEffectLimiter::setAttack(uint16_t a)
 {
+#ifdef AUDIO_NULL_IS_SILENCE
+    relaxed = false;
+#endif
     if (mtProject.values.limiterMode == limiterModeSubtle)
         attackTime = 1 - expf(-2.2f * (1000.0f / (44100.0f * a)));
     else if (mtProject.values.limiterMode == limiterModeHard)
@@ -31,6 +34,9 @@ AUDIO_CORE_FLASH void AudioEffectLimiter::setAttack(uint16_t a)
 }
 AUDIO_CORE_FLASH void AudioEffectLimiter::setRelease(float r)
 {
+#ifdef AUDIO_NULL_IS_SILENCE
+    relaxed = false;
+#endif
     if (mtProject.values.limiterMode == limiterModeSubtle)
         releaseTime = 1 - expf(-2.2f * (1000.0f / (44100.0f * r)));
     else if (mtProject.values.limiterMode == limiterModeHard)
@@ -39,6 +45,9 @@ AUDIO_CORE_FLASH void AudioEffectLimiter::setRelease(float r)
 
 AUDIO_CORE_FLASH void AudioEffectLimiter::setSidechainEnable(bool isEnable)
 {
+#ifdef AUDIO_NULL_IS_SILENCE
+    relaxed = false;
+#endif
     isSideChainEnable = isEnable;
 }
 
@@ -63,6 +72,22 @@ AUDIO_CORE_RAM void AudioEffectLimiter::update(void)
         processMainStream();
 }
 
+#ifdef AUDIO_NULL_IS_SILENCE
+// The peak detector is 0 and nothing is left in the look-ahead delay (the lines of the sidechain mode included). With silent input the
+// output is then zero whatever the gain does.
+AUDIO_CORE_RAM bool AudioEffectLimiter::isSteadyOnSilence(bool sidechain) const
+{
+    if (xpeak != 0)
+        return false;
+    for (uint8_t i = 0; i < LIMITER_DELAY; i++)
+    {
+        if (inputStorageBuffer[i] != 0 || (sidechain && outputStorageBuffer[i] != 0))
+            return false;
+    }
+    return true;
+}
+#endif
+
 AUDIO_CORE_RAM void AudioEffectLimiter::processSidechain()
 {
     audio_block_t* inputBlock;
@@ -74,13 +99,40 @@ AUDIO_CORE_RAM void AudioEffectLimiter::processSidechain()
 
     inputBlock = receiveWritable(0);
     sidechainBlock = receiveReadOnly(1);
+#ifdef AUDIO_NULL_IS_SILENCE
+    bool silentIn = false;
+    float gainBefore = 0.0f;
+#endif
     if (!inputBlock)
     {
-        if (sidechainBlock)
-            release(sidechainBlock);
-        return;
+#ifdef AUDIO_NULL_IS_SILENCE
+        // Silence in: the limiter still has to run (gain release, look-ahead delay, sidechain) until a block of silence leaves its whole
+        // state as it found it (relaxed). From then on every block of silence gives the same state, the same zero output and the same
+        // meter value, so it is skipped.
+        if (!sidechainBlock && relaxed)
+        {
+            isAverageGain = true;
+            return;
+        }
+        inputBlock = allocate();
+        if (inputBlock)
+        {
+            memset(inputBlock->data, 0, sizeof(inputBlock->data));
+            silentIn = !sidechainBlock && isSteadyOnSilence(true);
+            gainBefore = g;
+        }
+        else
+#endif
+        {
+            if (sidechainBlock)
+                release(sidechainBlock);
+            return;
+        }
     }
 
+#ifdef AUDIO_NULL_IS_SILENCE
+    relaxed = false;
+#endif
     inputData = sidechainBlock ? sidechainBlock->data : zeroblock;
     outputData = inputBlock->data;
 
@@ -121,6 +173,9 @@ AUDIO_CORE_RAM void AudioEffectLimiter::processSidechain()
     averageGain = sumGain / AUDIO_BLOCK_SAMPLES;
     sumGain = 0.0f;
     isAverageGain = true;
+#ifdef AUDIO_NULL_IS_SILENCE
+    relaxed = silentIn && g == gainBefore && isSteadyOnSilence(true);
+#endif
 
     transmit(inputBlock, 0);
     release(inputBlock);
@@ -137,11 +192,34 @@ AUDIO_CORE_RAM void AudioEffectLimiter::processMainStream()
 
     inputBlock = receiveWritable(0);
     sidechainBlock = receiveReadOnly(1);
+#ifdef AUDIO_NULL_IS_SILENCE
+    bool silentIn = false;
+    float gainBefore = 0.0f;
+#endif
     if (!inputBlock)
     {
-        if (sidechainBlock)
-            release(sidechainBlock);
-        return;
+#ifdef AUDIO_NULL_IS_SILENCE
+        if (relaxed)
+        {
+            if (sidechainBlock)
+                release(sidechainBlock);
+            isAverageGain = true;
+            return;
+        }
+        inputBlock = allocate();
+        if (inputBlock)
+        {
+            memset(inputBlock->data, 0, sizeof(inputBlock->data));
+            silentIn = isSteadyOnSilence(false);
+            gainBefore = g;
+        }
+        else
+#endif
+        {
+            if (sidechainBlock)
+                release(sidechainBlock);
+            return;
+        }
     }
 
     if (sidechainBlock)
@@ -149,6 +227,9 @@ AUDIO_CORE_RAM void AudioEffectLimiter::processMainStream()
         release(sidechainBlock);
         sidechainBlock = nullptr;
     }
+#ifdef AUDIO_NULL_IS_SILENCE
+    relaxed = false;
+#endif
     inputData = inputBlock->data;
 
     for (uint8_t n = 0; n < AUDIO_BLOCK_SAMPLES; n++)
@@ -183,6 +264,9 @@ AUDIO_CORE_RAM void AudioEffectLimiter::processMainStream()
     averageGain = sumGain / AUDIO_BLOCK_SAMPLES;
     sumGain = 0.0f;
     isAverageGain = true;
+#ifdef AUDIO_NULL_IS_SILENCE
+    relaxed = silentIn && g == gainBefore && isSteadyOnSilence(false);
+#endif
 
     transmit(inputBlock, 0);
     release(inputBlock);

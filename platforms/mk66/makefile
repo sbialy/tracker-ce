@@ -13,10 +13,19 @@ TRACKER_DIR	?= ../../core
 TARGET_POSTFIX	?= $(DEFAULT_TARGET_POSTFIX)
 BUILD_ID_STR	?= $(TARGET_POSTFIX)
 TARGET		:= PolyendTracker
+# Directory holding libTracker.a (the top level Makefile overrides it for SYNTH_OPEN=1)
+CORE_BUILD_DIR	?= $(TRACKER_DIR)/build-MK66-$(PRODUCT)
 
 # Build environment setup
 .DEFAULT_GOAL := build
 
+# Real flash image = text + data (.data load image sits after .text). 0xFF000 keeps the last 4 KB sector free.
+FLASH_IMG_MAX	?= 1044480
+# TRIM=1 (top Makefile, SYNTH_OPEN=1 builds only): the platform at -Os, -DFW_TRIM, linked against newlib-nano. The top
+# Makefile also gives it its own BUILD_DIR (build-trim) so the objects never mix with a plain build.
+TRIM		?=
+# Extra linker flags (the SYNTH_OPEN build asks for a link map: -Xlinker -Map=...)
+LINK_EXTRA	?=
 BUILD_DIR	:= build
 OBJ_DIR 	:= $(BUILD_DIR)/obj/
 RM 			:= rm -rf
@@ -25,6 +34,14 @@ CPP_SRCS 	+= $(shell find ./3rdparty/ -name *.cpp)
 CPP_SRCS 	+= $(shell find ./source/ -name *.cpp)
 C_SRCS 	 	+= $(shell find ./3rdparty/ -name *.c)
 ASM_SRCS 	+= $(shell find ./3rdparty/ -name *.S)
+# TRIM=1 only: word-wise memcpy / memset, newlib-nano's are byte loops (about 8 cycles per byte) and the audio interrupt uses them
+# every block. TRIM_FASTMEM=0 leaves them out (A/B builds that isolate the nano link)
+TRIM_FASTMEM ?= 1
+ifeq ($(TRIM),1)
+ifneq ($(TRIM_FASTMEM),0)
+ASM_SRCS 	+= ./source/fastmem.S
+endif
+endif
 
 _CPP_OBJS	= $(patsubst ./%.cpp, %.o, $(CPP_SRCS))
 _C_OBJS		= $(patsubst ./%.c, %.o, $(C_SRCS))
@@ -50,6 +67,14 @@ else
 COMPILER_OPTIONS+=-O2 -DNDEBUG
 endif
 
+ifeq ($(TRIM),1)
+# The compile flags above already say -specs=nano.specs, the stock link line does not (full newlib and libstdc++).
+# -u _printf_float keeps %f (about 50 UI call sites), scanf float is not used
+COMPILER_OPTIONS+=-Os
+DEFINES+=-DFW_TRIM
+TRIM_LINK	:= -specs=nano.specs -Xlinker -u -Xlinker _printf_float
+endif
+
 ifeq ($(PRODUCT), MINI)
 DEFINES+=-DTRACKER_MINI
 else ifeq ($(PRODUCT), ORIGINAL)
@@ -72,7 +97,7 @@ $(OBJ_DIR)/%.o: %.S
 	$(TOOLCHAIN)gcc -c -x assembler-with-cpp $(DEFINES) $(INCLUDES) -g -o "$@" "$<"
  
 $(TARGET): $(OBJS)
-	$(TOOLCHAIN)c++ -L ./3rdparty/teensy_core -L ./3rdparty/Audio -L ${TRACKER_DIR}/build-MK66-$(PRODUCT) -Xlinker --defsym=__rtc_localtime=0 -Xlinker -print-memory-usage -Xlinker --gc-sections -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -T mk66fx1m0.ld -o "$(BUILD_DIR)/$(TARGET).axf" $(OBJS) $(LIBS) 
+	$(TOOLCHAIN)c++ -L ./3rdparty/teensy_core -L ./3rdparty/Audio -L $(CORE_BUILD_DIR) -Xlinker --defsym=__rtc_localtime=0 -Xlinker -print-memory-usage -Xlinker --gc-sections -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -T mk66fx1m0.ld $(LINK_EXTRA) $(TRIM_LINK) -o "$(BUILD_DIR)/$(TARGET).axf" $(OBJS) $(LIBS) 
 	$(MAKE) --no-print-directory post-build
 	
 # Main rules
@@ -91,6 +116,7 @@ post-build:
 	$(TOOLCHAIN)objcopy --gap-fill=0xFF -v -O ihex "$(BUILD_DIR)/$(TARGET).axf" "$(BUILD_DIR)/$(TARGET)_$(TARGET_POSTFIX).ptf" 
 	$(TOOLCHAIN)objdump -S -C "$(BUILD_DIR)/$(TARGET).axf" > "$(BUILD_DIR)/$(TARGET)_$(NOW)_$(TARGET_POSTFIX).lss" 
 	$(TOOLCHAIN)size "$(BUILD_DIR)/$(TARGET).axf"
+	@$(TOOLCHAIN)size "$(BUILD_DIR)/$(TARGET).axf" | awk -v max=$(FLASH_IMG_MAX) 'NR==2 { img=$$1+$$2; printf "image (text+data) %d of %d B\n", img, max; if (img > max) { printf "ERROR: image (text+data) %d B exceeds FLASH_IMG_MAX %d B (%d over)\n", img, max, img-max; exit 1 } }'
 
 clean:
 	-$(RM) $(BUILD_DIR)

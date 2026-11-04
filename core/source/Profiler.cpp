@@ -11,6 +11,10 @@
 #include <algorithm>
 #include <vector>
 
+#ifdef FEATURE_SYNTH_OPEN
+#include "open_load.h"
+#endif
+
 // extern uint32_t _estack;
 extern "C"
 {
@@ -129,6 +133,12 @@ void Profiler::stopMeasuringAudio()
 
     sumOfSamples += lastSampleUs;
     samples++;
+
+#ifdef FEATURE_SYNTH_OPEN
+    // Block load for the open synth voice governor: raw DWT cycles of this audio block
+    polysynth::open::reportBlockCycles(
+      Tracker::getInstance()->getPlatform()->getTimer()->clockCycles() - audioUpdateTimer);
+#endif
 }
 
 void Profiler::getAudioProcessingUsageUs(AudioProcessorUsage& usage, bool resetTempMaximum)

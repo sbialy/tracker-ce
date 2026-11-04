@@ -30,10 +30,18 @@ class MixerAndFxs
 
     static constexpr int kExternalInputsCount = 1;
 #ifndef PLATFORM_IMX
-    static constexpr int kSendsInputsCount = 2 * kExternalInputsCount + voicesCount;
+#ifdef FEATURE_SYNTH_OPEN
+    // MK66 with the open synth: tracks, external inputs, then one send input per synth part
+    static constexpr int kFirstSynthSendInput = 2 * kExternalInputsCount + voicesCount;
+    static constexpr int kSendsInputsCount = kFirstSynthSendInput + kSynthParts;
 #else
-    static constexpr int kSendsInputsCount =
-      2 * kExternalInputsCount + 2 * voicesCount + kSynthParts;
+    static constexpr int kFirstSynthSendInput = 2 * kExternalInputsCount + voicesCount;
+    static constexpr int kSendsInputsCount = 2 * kExternalInputsCount + voicesCount;
+#endif
+#else
+    // Tracker+ layout: left and right send input per track, external inputs, then the synth parts
+    static constexpr int kFirstSynthSendInput = 2 * kExternalInputsCount + 2 * voicesCount;
+    static constexpr int kSendsInputsCount = kFirstSynthSendInput + kSynthParts;
 #endif
     static constexpr int kTrackMixerOutputsCount = 1;
     static constexpr int kTrackAndSendsMixerInputs =

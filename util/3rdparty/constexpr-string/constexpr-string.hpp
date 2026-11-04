@@ -1,6 +1,11 @@
 #ifndef PROXICT_CONSTEXPR_STRING_HPP_
 #define PROXICT_CONSTEXPR_STRING_HPP_
+#ifdef FEATURE_SYNTH_OPEN
+// <iostream> (unused here) pulls the libstdc++ locale machinery into the MK66 image
+#include <cstddef>
+#else
 #include <iostream>
+#endif
 #include <type_traits>
 
 template <bool TTest, typename TType = void>

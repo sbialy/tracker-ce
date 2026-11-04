@@ -1,6 +1,6 @@
 # Third-Party Notices & Attributions
 
-Polyend Tracker Community Edition (CE) incorporates or links against the following third-party open-source and binary components:
+tracker-ff (a fork of Polyend Tracker Community Edition, CE) incorporates or links against the following third-party open-source and binary components:
 
 ---
 
@@ -40,11 +40,53 @@ Polyend Tracker Community Edition (CE) incorporates or links against the followi
 * **Copyright**: Copyright (c) 2019 - 2022 Daniil Goncharov.
 
 ## 8. FastCRC
-* **Location**: `platforms/mk66/3rdparty/FastCRC/`, `platforms/imx/3rdparty/FastCRC/`
-* **License**: MIT / GPLv3 dual-licensed (used under MIT/BSD terms where applicable)
-* **Copyright**: Copyright (c) 2014-2016 Frank Boesing.
+* **Location**: `platforms/mk66/3rdparty/FastCRC/` (MK66 only, the i.MX tree has no copy)
+* **License**: MIT License. Every source file carries the header "FastCRC library code is placed under the MIT license" with the full MIT text, and upstream (https://github.com/FrankBoesing/FastCRC, `LICENCE.md`) is MIT too. There is no GPL option and no GPL code in this tree (an earlier version of this file said "MIT / GPLv3 dual-licensed", which was wrong).
+* **Copyright**: Copyright (c) 2014, 2015, 2016 Frank Bösing.
 
 ## 9. Polyend Precompiled Synth & DSP Libraries (`libPolySynth.a`, `libPolyDSP.a`)
 * **Location**: `synth/lib/`
 * **License**: Polyend Precompiled Synthesizer & DSP Library License (`synth/lib/LICENSE-PROPRIETARY.txt`)
 * **Copyright**: Copyright (c) 2023-2026 Polyend Sp. z o.o. All rights reserved.
+
+## 10. OpenTracker (open synth engines for the Original Tracker, `SYNTH_OPEN=1` build)
+* **Location**: `synth-open/ot/` (unmodified copies, each file carries a provenance line, licence text in `licenses/LICENSE-OpenTracker-Apache-2.0.txt`). `synth-open/open_patchio.cpp` is a changed, trimmed version of `formats/patch_pb.cpp` (marked in its header).
+* **Source**: https://github.com/sandlbn/polyend-tracker-re (commit 927b1516385e). Two files come from the 3.x line instead (branch `v3_fixes`, commit 789d55a4c5e8): `synth-open/ot/audio/synth_engine.h` (replaces the 2.x copy, the 3.x interface only adds `SynthHeld`, `cutoffOct` and the optional `slotPost()`) and `synth-open/ot/audio/bbd_chorus.h` (the chorus JU6 uses). Both carry a provenance line.
+* **License**: Apache License 2.0 (the upstream project ships no NOTICE file)
+* **Note**: the PERC drum engine (`synth-open/ot/audio/engines/perc.{h,cpp}`, same commit and licence, unmodified apart from the provenance line) is compiled only when `PERC` is in `SYNTH_ENGINES`. Its list icons are Polyend's (already in `core/libs/images`).
+* **Note**: the three header-only DSP kits `synth-open/ot/audio/{chip_dsp,fm_dsp,va_dsp}.h` also come from the `v3_fixes` line (commit 789d55a4c5e8, Apache-2.0, provenance line at the top, otherwise unmodified). They are included by the OpenTracker 3.x module engines of item 11 and compile to nothing on their own.
+* **Note**: `synth-open/ot/audio/dsp.h` also keeps its embedded notice for the PJRC Teensy Audio Library (MIT, Copyright (c) 2014-2017 Paul Stoffregen, PJRC.COM, LLC).
+
+## 11. opentracker-synths (the OpenTracker 3.x module engines for the `SYNTH_OPEN=1` build, optional)
+* **Location**: `synth-open/ot-synths/<module>/<module>.{cpp,h}` for the ten modules `ju6` (JU6), `fm4` (FM4), `dtype` (D-Type), `cstype` (CS-Type), `atype` (A-Type), `ttype` (T-Type drums), `eight` (8-Type), `hand` (Hand-Type), `btype` (B-Type) and `arc` (Arc-Type). Each file is unmodified apart from a two line provenance notice at the top. `synth-open/engine_<name>.cpp` carries the parameter ranges, labels, value formats, enum names and sections of the module's descriptor (`modules/<name>/src/<name>_desc.cpp`), marked in its header. The default macros and the edit curves in those files are this project's own choice. The module wrappers (`*_module.cpp`) and the descriptors themselves are not compiled.
+* **Source**: https://github.com/opentracker-fw/opentracker-synths (commit eb150a5f741b, `modules/<name>`)
+* **License**: MIT, Copyright (c) 2026 Marcin Spoczynski, text in `licenses/LICENSE-OpenTracker-synths-MIT.txt`. The repository states it contains no Polyend code.
+* **Note**: each engine is compiled only when its name is in `SYNTH_ENGINES` (`JU6 FM4 DTYPE CSTYPE ATYPE TTYPE 8TYPE HANDTYPE BTYPE ARCTYPE`). They need the 3.x `synth_engine.h` and `bbd_chorus.h` from item 10 and, for FM4, D-Type, CS-Type, A-Type, T-Type, 8-Type, Hand-Type, B-Type and Arc-Type, the DSP headers `chip_dsp.h`, `fm_dsp.h` and `va_dsp.h` from item 10 (Apache-2.0).
+* **Note**: D-Type's OpenTracker engine id (0x82) is the id of this project's own PHZ engine, so D-Type is keyed 0xA2 in the picker and in `.patch` files, the same as the poly-editor stores it (the engine code itself is unchanged).
+
+## 12. Polyend Chiptune (CHIP engine for the `SYNTH_OPEN=1` build, optional)
+* **Location**: `core/synth/engines/ChiptuneSynthVoice.cpp` is Polyend's own open Chiptune voice from this repository (the repository licence applies, see LICENSE). The only change is a small block of hooks marked `FEATURE_SYNTH_OPEN` (parameter switch, bend, reset, create) that `synth-open/engine_chip.cpp` calls. Its parameter table follows the same file.
+* **Note**: compiled only when `CHIP` is in `SYNTH_ENGINES`. Nothing here uses `libPolySynth.a` or `libPolyDSP.a`.
+
+## 13. PHZ (clean-room phase distortion engine for the `SYNTH_OPEN=1` build, optional)
+* **Location**: `synth-open/phz/phz.{cpp,h}` and `synth-open/engine_phz.cpp`, `synth-open/tools/phz_render.*`, `synth-open/tools/phz_cycles/`.
+* **Source**: written for this project from the public Polyend Synth manual (SYN2 p.76-80). Nothing of Polyend's closed code or binaries was read. The block rate voice skeleton and the filter stages are adapted from OpenTracker's VAP engine (item 10, Apache-2.0), the header of `phz.cpp` says so. No Mutable Instruments Plaits code is used.
+* **Note**: compiled only when `PHZ` is in `SYNTH_ENGINES`. The PHZ icons are Polyend's (already in `core/libs/images`).
+
+## 14. Mutable Instruments Polyverb sources (reverb code from Mutable Instruments Clouds and Rings)
+* **Location**: `core/libs/Audio/Polyverb/{reverb,fx_engine,util,cosine_oscillator}.h`
+* **License**: MIT License (the full text and "See http://creativecommons.org/licenses/MIT/" are in each file header)
+* **Copyright**: Copyright 2014 Emilie Gillet (emilie.o.gillet@gmail.com). Adapted for Polyverb by Wojciech Jakóbczyk (Polyend), as stated in the headers.
+
+## 15. Roboto Mono (UI bitmap font source)
+* **Location**: `core/libs/fonts/RobotoMono-*_L4.{h,cpp}` (4-bit `L4` glyph bitmaps converted from `RobotoMono-*.ttf`, see the first line of each file)
+* **License**: Apache License 2.0 (Roboto Mono by Christian Robertson, published by Google). The generated files carry no license header, the license is taken from the font's name and upstream, the text is `licenses/LICENSE-OpenTracker-Apache-2.0.txt` (same Apache-2.0 text).
+* **Copyright**: Copyright (c) Google Inc. (Apache-2.0, Roboto Mono project authors).
+
+## 16. util/3rdparty libraries (fmt, nanopb, tiny, constexpr-string)
+* **Location**: `util/3rdparty/{fmt,nanopb,tiny,constexpr-string}/`, each with its own license file
+* **License**: fmt: MIT (Copyright (c) 2012 - present, Victor Zverovich). nanopb: zlib license (Copyright (c) 2011 Petteri Aimonen). tiny (optional): Boost Software License 1.0. constexpr-string: MIT (Copyright (c) 2019 Marek Bogusovsky). The `boost`, `catch2`, `googletest` and `googlemock` copies there are not included by any firmware source (checked with git grep), so they are not in the image.
+
+## Release packages
+
+The `.ptf` images of the `SYNTH_OPEN=1` builds are distributed together with `LICENSE`, this file and a `licenses/` folder holding the full text of every bundled third-party license (made by `synth-open/tools/package_release.sh`). Texts that live in the repository: `licenses/LICENSE-OpenTracker-Apache-2.0.txt`, `licenses/LICENSE-OpenTracker-synths-MIT.txt`, `licenses/LICENSE-BSD-3-Clause-NXP.txt`, `licenses/LICENSE-LiberationFonts-OFL-1.1.txt`, `util/3rdparty/*/LICENSE*`. Texts that exist only as source headers (FastCRC, Polyverb, FatFs, PJRC Teensy core and audio library) are copied out of those headers by the packaging script, verbatim. The image links neither `libPolySynth.a` nor `libPolyDSP.a`, so `synth/lib/LICENSE-PROPRIETARY.txt` is not shipped. Factory patches and `.ptfx` plugins are not part of the package.

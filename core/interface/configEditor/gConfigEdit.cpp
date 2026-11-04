@@ -27,6 +27,15 @@ const char creditsText[] = {
     "Polyend Tracker Community Edition (CE)"
     "\nLicensed under the MIT License"
     "\n(No Wholesale Commercial Clones; see LICENSE)."
+#ifdef FEATURE_SYNTH_OPEN
+    "\n"
+    "\ntracker-ff 1.0.0: unofficial community firmware,"
+    "\nnot affiliated with Polyend."
+    "\nSynth engines: OpenTracker (Apache-2.0),"
+    "\ngithub.com/sandlbn/polyend-tracker-re"
+    "\nand opentracker-synths (MIT),"
+    "\ngithub.com/opentracker-fw/opentracker-synths"
+#endif
     "\n"
     "\nAll provided demo projects and samples are under a CC BY-NC 4.0 license."
     "\n"

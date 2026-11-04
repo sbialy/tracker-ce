@@ -34,12 +34,55 @@ class Synth
     static constexpr int kPanningDefault = 0;
     static constexpr int kSendMaxValue = 100;
     static constexpr float kSendDefaultValue = 0.0f;
+#ifdef FEATURE_SYNTH_OPEN
+    // SYNTH_OPEN (MK66): only the engines picked at build time (SYNTH_ENGINES, synth-open/engine_list.h, PERC only when picked)
+    // and no Shaping (no open engine). The model list on screen is this array.
+    static constexpr std::array kSynthTypes = {
+#define SYNTH_ENGINE(NAME, STORED, TYPE_ID, ...) TYPE_ID,
+#include "engine_list.h"
+#undef SYNTH_ENGINE
+    };
+    // Projects store an engine as its canonical number, not as its position in kSynthTypes, so a project keeps
+    // its engines when it is opened by a build with another engine set (engine_list.h).
+    static constexpr std::array kSynthStoredIdx = {
+#define SYNTH_ENGINE(NAME, STORED, ...) STORED,
+#include "engine_list.h"
+#undef SYNTH_ENGINE
+    };
+    // Position in kSynthTypes of a stored engine number, -1 when this build does not have the engine
+    static constexpr int storedToUi(int stored)
+    {
+        for (size_t i = 0; i < kSynthStoredIdx.size(); i++)
+        {
+            if (kSynthStoredIdx[i] == stored)
+            {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    }
+    static constexpr int uiToStored(int ui) { return kSynthStoredIdx.at(ui); }
+#else
     static constexpr std::array kSynthTypes = { polysynth::InstrumentTypeId::kSimpleAnalogSynth,
                                                 polysynth::InstrumentTypeId::kFatAnalogSynth,
                                                 polysynth::InstrumentTypeId::kVASynth,
                                                 polysynth::InstrumentTypeId::kFMSynth,
                                                 polysynth::InstrumentTypeId::kDrumSynth,
-                                                polysynth::InstrumentTypeId::kShapingSynth, polysynth::InstrumentTypeId::kChiptuneSynth };
+                                                polysynth::InstrumentTypeId::kShapingSynth,
+                                                polysynth::InstrumentTypeId::kChiptuneSynth
+                                              };
+    static constexpr int storedToUi(int stored)
+    {
+        return (stored >= 0 && stored < static_cast<int>(kSynthTypes.size())) ? stored : -1;
+    }
+    static constexpr int uiToStored(int ui) { return ui; }
+#endif
+    static constexpr bool isStoredTypeValid(int stored) { return storedToUi(stored) >= 0; }
+    static constexpr bool storedTypeIs(int stored, polysynth::InstrumentTypeId id)
+    {
+        const int ui = storedToUi(stored);
+        return ui >= 0 && kSynthTypes[ui] == id;
+    }
     static constexpr auto kInitPatchName = "Init";
 
     Synth();

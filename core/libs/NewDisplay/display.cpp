@@ -41,14 +41,18 @@
 #ifdef FEATURE_SYNTH
 #include "images/acd_mini_nomark_80x29_L2.h"
 #include "images/fat_mini_nomark_80x29_L2.h"
+#if FW_ICON_PERC
 #include "images/perc_mini_nomark_80x29_L2.h"
+#endif
 #include "images/phz_mini_nomark_80x29_L2.h"
 #include "images/vap_mini_nomark_80x29_L2.h"
 #include "images/wtfm_mini_nomark_80x29_L2.h"
 
 #include "images/acd_med_108x40_L2.h"
 #include "images/fat_med_108x40_L2.h"
+#if FW_ICON_PERC
 #include "images/perc_med_108x40_L2.h"
+#endif
 #include "images/phz_med_108x40_L2.h"
 #include "images/vap_med_108x40_L2.h"
 #include "images/wtfm_med_108x40_L2.h"
@@ -190,10 +194,19 @@ const strBitmap bitmaps[displayBitmapsCount] = {
     { synth_mod_22x12_L4, 119800, 132, 22, 12, L4, 11 },
     { synth_osc_20x12_L4, 120000, 120, 20, 12, L4, 10 },
 
+#if FW_ICON_PERC
+    // FW_TRIM (SYNTH_OPEN flash trim): the two PERC icons are only built in with an engine that wears them, PERC or T-Type (SYNTH_ENGINES, -1.6 KB without)
     { perc_mini_nomark_80x29_L2, 120200, 580, 80, 29, L2, 20 },
+#endif
+#if !defined(FEATURE_SYNTH_OPEN) || defined(SYNTH_ENGINE_PHZ)
     { phz_mini_nomark_80x29_L2, 120800, 580, 80, 29, L2, 20 },
+#endif
+#if FW_ICON_PERC
     { perc_med_108x40_L2, 121400, 1080, 108, 40, L2, 27 },
+#endif
+#if !defined(FEATURE_SYNTH_OPEN) || defined(SYNTH_ENGINE_PHZ)
     { phz_med_108x40_L2, 122500, 1080, 108, 40, L2, 27 },
+#endif
 
     { synth_FX_20x18_L4, 123600, 180, 20, 18, L4, 10 },
     { synth_cymbal_20x16_L4, 123800, 160, 20, 16, L4, 10 },
@@ -204,11 +217,15 @@ const strBitmap bitmaps[displayBitmapsCount] = {
     { synth_snare_20x16_L4, 124800, 160, 20, 16, L4, 10 },
     { synth_tom_20x16_L4, 125000, 160, 20, 16, L4, 10 },
 
+#ifndef FEATURE_SYNTH_OPEN
     { dirt_mini_nomark_80x28_L2, 125200, 560, 80, 28, L2, 20 },
     { dirt_med_108x40_L2, 125800, 1080, 108, 40, L2, 27 },
     { synth_shaper_18x18_L4, 126900, 162, 18, 18, L4, 9 },
+#endif
+#if FW_ICON_CHIP
     { chip_mini_nomark_80x28_L2, 127100, 560, 80, 28, L2, 20 },
     { chip_med_108x40_L2, 127700, 1080, 108, 40, L2, 27 },
+#endif
 
 #endif
 };

@@ -16,10 +16,21 @@
 #include <cmath>
 
 const char* const OffOnNames[] = { "Off", "On" };
+#ifdef FEATURE_SYNTH_OPEN
+// SYNTH_OPEN (MK66): the engines picked at build time, in the order of Synth::kSynthTypes (engine_list.h)
+static const int synthModelListImages[Synth::kSynthTypes.size()] = {
+#define SYNTH_ENGINE(NAME, STORED, TYPE_ID, FACTORY, DEF, PATCH_ENGINE, MINI_ICON, ICON) \
+    enDisplayBitmaps::ICON,
+#include "engine_list.h"
+#undef SYNTH_ENGINE
+};
+#else
 static const int synthModelListImages[Synth::kSynthTypes.size()] = {
     enDisplayBitmaps::kBitmapACD,  enDisplayBitmaps::kBitmapFAT,  enDisplayBitmaps::kBitmapVAP,
-    enDisplayBitmaps::kBitmapWTFM, enDisplayBitmaps::kBitmapPERC, enDisplayBitmaps::kBitmapDIRT, enDisplayBitmaps::kBitmapCHIP
+    enDisplayBitmaps::kBitmapWTFM, enDisplayBitmaps::kBitmapPERC, enDisplayBitmaps::kBitmapDIRT,
+    enDisplayBitmaps::kBitmapCHIP
 };
+#endif
 
 static cInstrumentEditor* IE = &instrumentEditor;
 
@@ -1028,9 +1039,9 @@ void cInstrumentEditor::showSynthPatchEditorScreen()
     display.setControlSize(modelListControl, 800 / 8 - 3, -1);
 
     uint8_t syntPartIdx = mtProject.values.lastUsedInstrument - SYNTH_INSTRUMENTS_START_IDX;
-    assert(mtProject.values.synthPart[syntPartIdx].synthType < sizeof(synthModelListImages));
-    labelImage.bitmaps[0].bitmapIndex =
-      synthModelListImages[mtProject.values.synthPart[syntPartIdx].synthType];
+    const int modelUi = std::max(Synth::storedToUi(mtProject.values.synthPart[syntPartIdx].synthType), 0);
+    assert(modelUi < static_cast<int>(Synth::kSynthTypes.size()));
+    labelImage.bitmaps[0].bitmapIndex = synthModelListImages[modelUi];
     labelImage.bitmaps[0].xValue = 116;
     labelImage.bitmaps[0].yValue = 49;
     labelImage.bitmaps[1].bitmapIndex = 0;
@@ -1229,7 +1240,9 @@ void cInstrumentEditor::showSynthPatchSection(bool refreshList)
                 {
                     shortName = "Shp";
                     number = 0;
+#ifndef FEATURE_SYNTH_OPEN
                     sectionImgList[idx] = kBitmapShaper;
+#endif
                 }
                 else if (sectionName.find("Kick") != std::string::npos)
                 {

@@ -444,6 +444,13 @@ AUDIO_CORE_RAM void AudioPlayMemory::envelopeUpdate(audio_block_t* block)
 
     if (envelope.state == envelopePhaseIdle)
     {
+#ifdef AUDIO_NULL_IS_SILENCE
+        // an idle voice transmits nothing: the bit depth, filter, amplifier, mono to stereo, meter, mixers and export taps
+        // treat the missing block as silence (AudioStream.h)
+        if (block)
+            AudioStream::release(block);
+        return;
+#else
         if (!block)
         {
             block = allocate();
@@ -454,6 +461,7 @@ AUDIO_CORE_RAM void AudioPlayMemory::envelopeUpdate(audio_block_t* block)
         transmit(block);
         AudioStream::release(block);
         return;
+#endif
     }
 
     if (!block)

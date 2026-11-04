@@ -1069,7 +1069,12 @@ void cSongEditor::changeGlobalTempo(float value)
 
     tapTempo_end(); // jak zmiana to wylacz TAP
 
+#ifdef FW_TRIM
+    // value is a float step: whole number test without the double remainder() (flash trim)
+    if (value == floorf(value))
+#else
     if (remainder(value, 1.0) == 0.0)
+#endif
     {
         mtProject.values.globalTempo = (uint16_t)mtProject.values.globalTempo; // do calkowitych
     }

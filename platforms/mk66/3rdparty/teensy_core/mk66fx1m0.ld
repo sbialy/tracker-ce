@@ -170,6 +170,13 @@ SECTIONS
     _image_start = LOADADDR(.text);
     _image_end = LOADADDR(.data) + SIZEOF(.data);
     _image_size = _image_end - _image_start;
+
+    /* ld's -print-memory-usage FLASH line leaves out the .data load image (AT(_etext)), so the
+       real image is text + data. Keep it below the last 4 KB sector (0xFF000), see FLASH_IMG_MAX
+       in platforms/mk66/makefile. Pure check, emits no bytes. make synth-engines links all engines at once
+       to measure them and lifts the cap for that one link with --defsym=__flash_img_max (never for an image
+       that is flashed). */
+    ASSERT(LOADADDR(.data) + SIZEOF(.data) <= (DEFINED(__flash_img_max) ? __flash_img_max : 0xFF000), "flash image (text + data) exceeds 0xFF000")
 }
 
 

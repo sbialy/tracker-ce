@@ -28,6 +28,9 @@
 #include "interruptsControl.h"
 #include "mtStructs.h"
 #include <numeric>
+#ifdef FEATURE_SYNTH_OPEN
+#include "open_load.h"
+#endif
 
 static const std::array kDefaultSettings = {
     SynthPartSettings{ .gainDb = Synth::kGainDefault,
@@ -115,7 +118,7 @@ void Synth::init(Platform* platform, std::function<tiny_optional<float>()> getTe
         int partIdx = std::distance(parts.begin(), &part);
         auto& instrument = part.instrument;
 
-        part.instrumentTypeId = kSynthTypes[partIdx];
+        part.instrumentTypeId = kSynthTypes[partIdx % kSynthTypes.size()];
         part.patchName = kInitPatchName;
         setPatch(partIdx, patchStore->createPatch(*part.instrumentTypeId), part.patchName);
 
@@ -376,6 +379,12 @@ void Synth::updateToSettings(const strMtValues& settings, bool resetAllVoices)
 {
     if (resetAllVoices)
     {
+#ifdef FEATURE_SYNTH_OPEN
+        // project load: no voice and no governor state from the previous project
+        DISABLE_AUDIO_INTERRUPTS();
+        polysynth::open::resetOnProjectLoad();
+        ENABLE_AUDIO_INTERRUPTS();
+#endif
         for (int part = 0; part < kSynthParts; part++)
         {
             setVoiceCount(part, 0);
@@ -384,9 +393,14 @@ void Synth::updateToSettings(const strMtValues& settings, bool resetAllVoices)
 
     for (int part = 0; part < kSynthParts; part++)
     {
-        setVoiceCount(part, settings.synthPart[part].voiceCount);
-        setInstrumentType(part, kSynthTypes.at(settings.synthPart[part].synthType));
-        parts[part].patchName = settings.synthPart[part].patchName;
+        // The project is validated only after this (loadProjectValues), but kSynthTypes.at() aborts
+        // on a bad index: SYNTH_OPEN has no PERC, so a part saved as PERC (or Shaping/Chip) must
+        // fall back to the part defaults here as well.
+        SynthPartSettings partSettings = settings.synthPart[part];
+        validateSynthPartSettings(part, partSettings);
+        setVoiceCount(part, partSettings.voiceCount);
+        setInstrumentType(part, kSynthTypes.at(storedToUi(partSettings.synthType)));
+        parts[part].patchName = partSettings.patchName;
     }
 }
 
@@ -395,6 +409,13 @@ void Synth::updateToSettings(const strMtValues& settings, bool resetAllVoices)
 void Synth::initSynthPartSettings(int part, SynthPartSettings& settings)
 {
     settings = kDefaultSettings.at(part);
+#ifdef FEATURE_SYNTH_OPEN
+    // the default engine of this part may not be in this build: first engine that is
+    if (!isStoredTypeValid(settings.synthType))
+    {
+        settings.synthType = uiToStored(0);
+    }
+#endif
 
     initSynthPartMacrosValues(part, settings);
 
@@ -428,7 +449,7 @@ void Synth::validateSynthPartSettings(int part, SynthPartSettings& settings)
         }
     }
 
-    if (isOutOfRange<int>(settings.synthType, 0, std::ssize(kSynthTypes) - 1) ||
+    if (!isStoredTypeValid(settings.synthType) ||
         isOutOfRange<int>(settings.voiceCount, 0, kSynthMaxVoices) ||
         isOutOfRange<float>(settings.gainDb, kGainSilence, kGainMax) ||
         isOutOfRange<float>(settings.panning, -kPanningMax, kPanningMax) ||

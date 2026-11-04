@@ -576,7 +576,9 @@ void audioEngine::connectMixerToOutput(MixerAndFxs<kVoices>* mixerAndFxs, AudioO
 #ifdef FEATURE_SYNTH
 void audioEngine::connectSynthToMixer(MixerAndFxs<kVoices>* mixerAndFxs, SynthVoice* synth)
 {
-    constexpr int kFirstSynthMixerChannel = 2 + 2 * kVoices;
+    constexpr int kFirstSynthMixerChannel = MixerAndFxs<kVoices>::kFirstSynthSendInput;
+    static_assert(kFirstSynthMixerChannel + kSynthParts <= MixerAndFxs<kVoices>::kSendsInputsCount,
+                  "a synth send input is outside the pre fx mixers");
 
     for (int synthChannel = 0; synthChannel < kSynthParts; synthChannel++)
     {
@@ -652,8 +654,12 @@ void audioEngine::connectSynthToExportQueue(SynthVoice* synth, ExportQueues* exp
     }
 }
 
-void audioEngine::connectSynthToOutput(SynthVoice* synth, AudioOutput* output)
+void audioEngine::connectSynthToOutput([[maybe_unused]] SynthVoice* synth,
+                                       [[maybe_unused]] AudioOutput* output)
 {
+#ifdef PLATFORM_IMX
+    // The limiter sidechain mux and the USB audio stream exist only in the IMX AudioOutput.
+    // On MK66 (FEATURE_SYNTH_OPEN) the synth reaches the output through connectSynthToMixer only.
     for (int synthPartIdx = 0; synthPartIdx < kSynthParts; synthPartIdx++)
     {
 
@@ -687,6 +693,7 @@ void audioEngine::connectSynthToOutput(SynthVoice* synth, AudioOutput* output)
           output->getUsbStream(),
           rightSynthUsbIdx));
     }
+#endif
 }
 
 #endif
@@ -1255,7 +1262,7 @@ AUDIO_CORE_RAM void audioEngine::setSynthDelaySend(int synthIdx, float value)
         gain = mtProject.values.delayMute ? AMP_MUTED : gainFromDelay * gainFromVolume;
     }
 
-    int mixerInputIdx = 2 + 2 * kVoices + synthIdx;
+    int mixerInputIdx = MixerAndFxs<kVoices>::kFirstSynthSendInput + synthIdx;
     mixerAndFxs.getPreFxMixer(MixerAndFxs<kVoices>::FxType::kDelay)->gain(mixerInputIdx, gain);
 }
 
@@ -1279,7 +1286,7 @@ AUDIO_CORE_RAM void audioEngine::setSynthReverbSend(int synthIdx, float value)
         gain = mtProject.values.reverbMute ? AMP_MUTED : gainFromReverb * gainFromVolume;
     }
 
-    int mixerInputIdx = 2 + 2 * kVoices + synthIdx;
+    int mixerInputIdx = MixerAndFxs<kVoices>::kFirstSynthSendInput + synthIdx;
     mixerAndFxs.getPreFxMixer(MixerAndFxs<kVoices>::FxType::kReverb)->gain(mixerInputIdx, gain);
 }
 
@@ -1315,6 +1322,11 @@ AUDIO_CORE_RAM void audioEngine::updateSynthParams()
 {
     for (int synthIdx = 0; synthIdx < kSynthParts; synthIdx++)
     {
+        if (isSynthParamDirty[synthIdx].none())
+        {
+            continue;
+        }
+
         for (int paramIdx = 0; paramIdx < SynthParam::kSynthParamsCount; paramIdx++)
         {
             updateSynthParam(synthIdx, (SynthParam)paramIdx);

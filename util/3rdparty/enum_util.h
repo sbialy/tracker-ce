@@ -4,7 +4,13 @@
  * From https://www.thecodeteacher.com/question/59748/Max-and-min-values-in-a-C++-enum
  */
 
+#ifdef FEATURE_SYNTH_OPEN
+// <iostream> only adds a static std::ios_base::Init per TU and drags the whole libstdc++
+// locale machinery (about 150 KB of flash) into the MK66 image. Nothing here prints.
+#include <cstdint>
+#else
 #include <iostream>
+#endif
 #include <limits>
 #include <type_traits>
 

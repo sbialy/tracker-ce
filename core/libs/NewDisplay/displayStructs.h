@@ -5,6 +5,21 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// Which engine icons are built in. PERC and CHIP are lettered logos that the OpenTracker engines borrow (T-Type wears PERC,
+// 8-Type Hand-Type and B-Type wear CHIP, synth-open/engine_list.h), so they are kept when any of those engines is picked.
+// FW_ICON_PERC: PERC icons are always built in without FW_TRIM. FW_ICON_CHIP: CHIP icons are always built in outside SYNTH_OPEN.
+#if !defined(FW_TRIM) || defined(SYNTH_ENGINE_PERC) || defined(SYNTH_ENGINE_TTYPE)
+#define FW_ICON_PERC 1
+#else
+#define FW_ICON_PERC 0
+#endif
+#if !defined(FEATURE_SYNTH_OPEN) || defined(SYNTH_ENGINE_CHIP) || defined(SYNTH_ENGINE_8TYPE) || defined(SYNTH_ENGINE_HANDTYPE) || \
+    defined(SYNTH_ENGINE_BTYPE)
+#define FW_ICON_CHIP 1
+#else
+#define FW_ICON_CHIP 0
+#endif
+
 class cDisplayControl;
 class cDebugLog;
 class cDisplay;
@@ -61,10 +76,18 @@ enum enDisplayBitmaps
     kBitmapMod,
     kBitmapOsc,
 
+#if FW_ICON_PERC
     kBitmapMiniPERC,
+#endif
+#if !defined(FEATURE_SYNTH_OPEN) || defined(SYNTH_ENGINE_PHZ)
     kBitmapMiniPHZ,
+#endif
+#if FW_ICON_PERC
     kBitmapPERC,
+#endif
+#if !defined(FEATURE_SYNTH_OPEN) || defined(SYNTH_ENGINE_PHZ)
     kBitmapPHZ,
+#endif
 
     kBitmapFX,
     kBitmapCymbal,
@@ -75,11 +98,17 @@ enum enDisplayBitmaps
     kBitmapSnare,
     kBitmapTom,
 
+#ifndef FEATURE_SYNTH_OPEN
+    // SYNTH_OPEN (MK66): no open engine for DIRT/PHZ/Shaper, icons dropped to save flash
     kBitmapMiniDIRT,
     kBitmapDIRT,
     kBitmapShaper,
+#endif
+#if FW_ICON_CHIP
+    // SYNTH_OPEN: the CHIP icons (1.6 KB) only when an engine that wears them is picked (CHIP, 8-Type, Hand-Type, B-Type)
     kBitmapMiniCHIP,
     kBitmapCHIP,
+#endif
 
 #endif
 

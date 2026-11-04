@@ -11,6 +11,10 @@
 #include <algorithm>
 #include <cr_section_macros.h>
 
+#ifdef FEATURE_SYNTH_OPEN
+#include "open_load.h"
+#endif
+
 #define EXPORT_DEBUG 0
 /*
  * block to 128próbek * 2kanaly stereo* 2bajty
@@ -74,6 +78,9 @@ void mtAudioExport::setExternalSettings()
     sequencer.detachFromTimer();
 
     AudioStream::renderMode = 1;
+#ifdef FEATURE_SYNTH_OPEN
+    polysynth::open::setOffline(true);
+#endif
     AudioPlayMemory::initNotesLookup(false);
 
     elapsedMillisAudio::enterVirtualTimeMode();
@@ -115,6 +122,9 @@ void mtAudioExport::callBackExternalSettings()
     }
 
     AudioStream::renderMode = 0;
+#ifdef FEATURE_SYNTH_OPEN
+    polysynth::open::setOffline(false);
+#endif
     AudioPlayMemory::initNotesLookup(true);
 
     elapsedMillisAudio::exitVirtualTimeMode();

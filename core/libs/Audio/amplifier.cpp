@@ -47,4 +47,11 @@ AUDIO_CORE_RAM void AudioAmplifier::update(void)
         transmit(block);
         release(block);
     }
+#ifdef AUDIO_NULL_IS_SILENCE
+    else
+    {
+        // a block of zeros through applyGain ends the ramp: previous = target
+        previousMultiplier = multiplier;
+    }
+#endif
 }

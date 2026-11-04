@@ -21,6 +21,21 @@ static const uint16_t framesPlacesSynth[1][4] = {
     { (800 / 8) * 6 + 1, 31, 800 / 4 - 3, 391 },
 };
 
+#ifdef FEATURE_SYNTH_OPEN
+// SYNTH_OPEN (MK66): the engines picked at build time, in the order of Synth::kSynthTypes (engine_list.h)
+const char* const synthModelNames[Synth::kSynthTypes.size()] = {
+#define SYNTH_ENGINE(NAME, ...) #NAME,
+#include "engine_list.h"
+#undef SYNTH_ENGINE
+};
+
+static const int synthModelListImages[Synth::kSynthTypes.size()] = {
+#define SYNTH_ENGINE(NAME, STORED, TYPE_ID, FACTORY, DEF, PATCH_ENGINE, MINI_ICON, ICON) \
+    enDisplayBitmaps::MINI_ICON,
+#include "engine_list.h"
+#undef SYNTH_ENGINE
+};
+#else
 const char* const synthModelNames[Synth::kSynthTypes.size()] = {
     "ACD", "FAT", "VAP", "WTFM", "PERC", "DIRT", "CHIP",
 };
@@ -28,9 +43,9 @@ const char* const synthModelNames[Synth::kSynthTypes.size()] = {
 static const int synthModelListImages[Synth::kSynthTypes.size()] = {
     enDisplayBitmaps::kBitmapMiniACD,  enDisplayBitmaps::kBitmapMiniFAT,
     enDisplayBitmaps::kBitmapMiniVAP,  enDisplayBitmaps::kBitmapMiniWTFM,
-    enDisplayBitmaps::kBitmapMiniPERC, enDisplayBitmaps::kBitmapMiniDIRT,
-    enDisplayBitmaps::kBitmapMiniCHIP
+    enDisplayBitmaps::kBitmapMiniPERC, enDisplayBitmaps::kBitmapMiniDIRT, enDisplayBitmaps::kBitmapMiniCHIP
 };
+#endif
 
 static cInstrumentEditor* IE = &instrumentEditor;
 
@@ -398,26 +413,27 @@ void cInstrumentEditor::changeSynthModel(int16_t value)
 
     int modelMaxValue = (Synth::kSynthTypes.size() - 1);
 
+    // The project stores the engine's canonical number, the list on screen is the engines of this build
     int32_t previousSynthType = mtProject.values.synthPart[syntPartIdx].synthType;
+    const int previousUi = std::max(Synth::storedToUi(previousSynthType), 0);
+    int newUi;
 
-    if (IE->rollListOver &&
-        mtProject.values.synthPart[syntPartIdx].synthType + value > modelMaxValue)
+    if (IE->rollListOver && previousUi + value > modelMaxValue)
     {
-        mtProject.values.synthPart[syntPartIdx].synthType = 0;
+        newUi = 0;
     }
     else
     {
-        mtProject.values.synthPart[syntPartIdx].synthType =
-          clamp<int>(mtProject.values.synthPart[syntPartIdx].synthType + value, 0, modelMaxValue);
+        newUi = clamp<int>(previousUi + value, 0, modelMaxValue);
     }
+    mtProject.values.synthPart[syntPartIdx].synthType = Synth::uiToStored(newUi);
 
     if (previousSynthType == mtProject.values.synthPart[syntPartIdx].synthType)
     {
         return;
     }
 
-    synth->setInstrumentType(
-      syntPartIdx, Synth::kSynthTypes.at(mtProject.values.synthPart[syntPartIdx].synthType));
+    synth->setInstrumentType(syntPartIdx, Synth::kSynthTypes.at(newUi));
 
     changeSynthPolyphony(0);
 
@@ -815,7 +831,7 @@ void cInstrumentEditor::showSynthParamsScreen()
     display.setControlPosition(noteLabel, 625, 45);
     display.setControlSize(noteLabel, 170, 30);
 
-    modelListData.start = mtProject.values.synthPart[syntPartIdx].synthType;
+    modelListData.start = std::max(Synth::storedToUi(mtProject.values.synthPart[syntPartIdx].synthType), 0);
     modelListData.length = Synth::kSynthTypes.size();
     modelListData.linesCount = std::min<uint16_t>(Synth::kSynthTypes.size(), 7);
     modelListData.rowHeight = 50;
@@ -904,7 +920,9 @@ void cInstrumentEditor::showSynthParamsScreen()
 
 void cInstrumentEditor::showSynthModel(uint8_t synthPart)
 {
-    display.setControlValue(modelListControl, mtProject.values.synthPart[synthPart].synthType);
+    display.setControlValue(
+      modelListControl,
+      std::max(Synth::storedToUi(mtProject.values.synthPart[synthPart].synthType), 0));
     display.refreshControl(modelListControl);
     titleBar->showCurrentInstrumentOnRightLabel();
 }

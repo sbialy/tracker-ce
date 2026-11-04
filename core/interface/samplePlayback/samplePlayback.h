@@ -3,6 +3,9 @@
 
 #include "core/modulesBase.h"
 
+#include <algorithm>
+#include <iterator>
+
 #include "mtSequencer.h"
 
 #include "mtStructs.h"
@@ -55,7 +58,7 @@ class cSamplePlayback : public ModuleBase
         spectrumControl[1] = -1;
         pointsControl = -1;
         slicePointsControl = -1;
-        label[8] = { -1 };
+        std::fill(std::begin(label), std::end(label), -1);
         // popupLabel = -1;
         lastSampleLength = 0;
     }

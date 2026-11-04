@@ -964,9 +964,16 @@ unsigned short AudioControlSGTL5000::autoVolumeControl(uint8_t maxGain,
         maxGain = 2;
     lbiResponse &= 3;
     hardLimit &= 1;
+#ifdef FW_TRIM
+    // float powf instead of double pow (flash trim: drops the double pow and its libm kernels)
+    uint8_t thresh = (powf(10, threshold / 20) * 0.636f) * powf(2, 15);
+    uint8_t att = (1 - powf(10, -(attack / (20 * 44100)))) * powf(2, 19);
+    uint8_t dec = (1 - powf(10, -(decay / (20 * 44100)))) * powf(2, 23);
+#else
     uint8_t thresh = (pow(10, threshold / 20) * 0.636) * pow(2, 15);
     uint8_t att = (1 - pow(10, -(attack / (20 * 44100)))) * pow(2, 19);
     uint8_t dec = (1 - pow(10, -(decay / (20 * 44100)))) * pow(2, 23);
+#endif
     write(DAP_AVC_THRESHOLD, thresh);
     write(DAP_AVC_ATTACK, att);
     write(DAP_AVC_DECAY, dec);
@@ -1074,10 +1081,17 @@ void calcBiquad(uint8_t filtertype,
     // those values are limited to valid results.
 
     float A;
+#ifdef FW_TRIM
+    if (filtertype < FILTER_PARAEQ)
+        A = powf(10, dB_Gain / 20);
+    else
+        A = powf(10, dB_Gain / 40);
+#else
     if (filtertype < FILTER_PARAEQ)
         A = pow(10, dB_Gain / 20);
     else
         A = pow(10, dB_Gain / 40);
+#endif
     float W0 = 2 * 3.14159265358979323846 * fC / fS;
     float cosw = cosf(W0);
     float sinw = sinf(W0);

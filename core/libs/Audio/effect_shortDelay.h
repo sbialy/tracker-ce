@@ -71,6 +71,16 @@ class AudioEffectShortDelay : public AudioStream
     int32_t lastFilterOutLeft;
     int32_t lastFilterOutMono;
     uint32_t silentSamplesCount = MAX_DELAYLINE_LENGTH;
+#ifdef AUDIO_NULL_IS_SILENCE
+    // Consecutive samples (whole blocks) in which the values written to all three lines were zero: the last timeInSamples of them
+    // fill the delay window. With the filters at rest a block of silent input can be skipped bit exactly.
+    uint32_t quietSamplesCount = 0;
+
+    // process() for update(): with kTrackQuiet the block is also checked for quietSamplesCount (silent input only, the loop then has a
+    // few more instructions), without it the count is cleared (the input has sound)
+    template<bool kTrackQuiet>
+    bool processBlock(int16_t input[], int16_t outputLeft[], int16_t outputRight[], int sampleCount);
+#endif
 };
 
 #endif /* LIBS_AUDIO_EFFECT_SHORTDELAY_H_ */

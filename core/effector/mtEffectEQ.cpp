@@ -49,8 +49,14 @@ void mtEffectEQ::initContext(EqContext* ctx, float freq, float bandwidth, float 
     ctx->z2 = 0;
     // remap level +- 12db => gain 1-4 peak, 0-1 notch
     ctx->gain = level >= 0 ? (1 + level * 3 / 12) : (1 + level * 0.8 / 12);
+#ifdef FW_TRIM
+    // float cosf/tanf instead of double cos/tan (flash trim, drops the double libm kernels)
+    ctx->d = cosf(2 * (float)M_PI * freq / AUDIO_SAMPLE_RATE_EXACT);
+    ctx->c = tanf((float)M_PI * bandwidth / AUDIO_SAMPLE_RATE_EXACT);
+#else
     ctx->d = cos(2 * M_PI * freq / AUDIO_SAMPLE_RATE_EXACT);
     ctx->c = tan(M_PI * bandwidth / AUDIO_SAMPLE_RATE_EXACT);
+#endif
 }
 
 bool mtEffectEQ::startProcess()

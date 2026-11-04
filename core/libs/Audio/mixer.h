@@ -31,8 +31,24 @@
 #include "dspApplyGain.h"
 #include "util_math.h"
 
+#ifdef AUDIO_NULL_IS_SILENCE
+// The per block work of every mixer size is one function (mixer.cpp, AudioMixerBase::mix), the template only holds the gain tables
+class AudioMixerBase : public AudioStream
+{
+  protected:
+    AudioMixerBase(unsigned char inputs, audio_block_t** queue)
+      : AudioStream(inputs, queue)
+    {
+    }
+    void mix(int size, int32_t* multiplier, int32_t* previousMultiplier, SaturationType saturationType);
+};
+#define AUDIO_MIXER_PARENT AudioMixerBase
+#else
+#define AUDIO_MIXER_PARENT AudioStream
+#endif
+
 template<int mixerSize>
-class AudioMixer : public AudioStream
+class AudioMixer : public AUDIO_MIXER_PARENT
 {
   public:
     static constexpr float kUnityGain = 65536.0f;
@@ -40,7 +56,7 @@ class AudioMixer : public AudioStream
     static constexpr float kMaxGain = 32767.0f;
 
     AudioMixer(void)
-      : AudioStream(mixerSize, inputQueueArray)
+      : AUDIO_MIXER_PARENT(mixerSize, inputQueueArray)
     {
         for (int i = 0; i < mixerSize; i++)
         {

@@ -1,0 +1,403 @@
+# tracker-ff 1.0.0 - synth-open, the open PolySynth shim for the original Tracker (MK66)
+
+tracker-ff is a fork of Polyend's Tracker CE firmware (FF as in 0xFF). `synth-open/` is the directory and the make flag (`SYNTH_OPEN=1`) of its synth layer. The repository README is `../README.md`. This file is the technical description of the shim and of the build.
+
+The shim is built only with `make original SYNTH_OPEN=1`. It replaces the closed `libPolySynth.a` and `libPolyDSP.a` (Cortex-M7 only, the licence forbids reverse engineering) on the original Tracker. The closed libraries are never linked here and nothing in this directory was derived from them. Everything is written from the open headers in `synth/include/PolySynth` and from OpenTracker (Apache-2.0).
+
+What 1.0.0 has:
+
+- 17 synth engines in one image, chosen at build time (see "Engine picker"). ACD, FAT, VAP and WTFM are the Polyend engines as OpenTracker re-implements them. PERC is OpenTracker's drum engine, CHIP is Polyend's own open Chiptune voice, PHZ is our own phase distortion engine written from the public manual, and JU6, FM4, D-Type, CS-Type, A-Type, T-Type, 8-Type, Hand-Type, B-Type and Arc-Type are OpenTracker 3.x modules. MIDI registers by name only and Shaping has no engine.
+- Up to 4 voices per instrument, a shared voice pool and OpenTracker's governor.
+- `.patch` files that load and save from the SD card, and pitch bend.
+- A flash trim (`TRIM=1`) that makes all 17 engines fit in the original's flash.
+- A set of audio CPU optimisations that remove work the stock firmware does for silence.
+
+Status: 1.0.0 has not been run on a device. An earlier pre-release build of the same design was run on one original Tracker, and the device numbers below are labelled as such. The host smoke test and the emulated benches are the checks that cover 1.0.0 itself.
+
+## Source files
+
+| File | Content |
+|---|---|
+| `open_synth.cpp` | Render path, built at `-O2`: `Synth`, `Instrument` (voice allocation and steal, legato reuse in mono, MIDI note on/off/CC from `MidiAdapter`), `OpenPatch::effective` (macros with the OpenTracker additive law) |
+| `open_patch.h` | `OpenPatch` (values, macros, Macro 7 velocity to Volume), shared by the two files |
+| `open_patchdata.h` | Plain `PatchData` model of a `.patch` file and the codec interface |
+| `open_patchio.cpp` | `.patch` codec (protobuf wire reader and writer), `-Os`. Trimmed from OpenTracker's `formats/patch_pb.cpp` (Apache-2.0, a changed file, the header says so) |
+| `open_cold.cpp` | Cold code, built at `-Os` (`SYNTH_OPT_COLD`): value text, edit curves, registry factories and metadata, the `OpenPatch` GUI API and `PatchStore` (file backed, see "Patch files") |
+| `open_load.h` | Plain C++ interface the core calls into: `reportBlockCycles` (block load, from `Profiler::stopMeasuringAudio`), `setOffline` (exporter), `setVoiceBudget`, `partIdle` and read-outs |
+| `open_engine.h` | `EngineDef`: parameter table, editor sections, default macros and the hosted `ISynthEngine`. A new engine is one `EngineDef` plus its engine source |
+| `engines.mk` `engine_list.h` | The engine picker: names, sources and default set (`engines.mk`, read by the top Makefile and `core/makefile`) and one X-macro entry per engine (`engine_list.h`: registry factory, `Synth::kSynthTypes`, editor name and icon, `.patch` engine id, stored project number) |
+| `engine_<name>.cpp` | One `EngineDef` per engine (parameter table, sections, default macros, value text). `engine_acd.cpp` also holds the enum name tables shared by all engines |
+| `engine_chip.cpp` | CHIP: also the `ISynthEngine` adapter that hosts `core/synth/engines/ChiptuneSynthVoice.cpp` |
+| `phz/` | PHZ, our own engine (`phz.cpp`, `phz.h`) |
+| `ot/` | Copies from OpenTracker (commit 927b1516385e, Apache-2.0): `audio/engines/{acd,fat,vap,wtfm,perc}.{h,cpp}`, `audio/dsp.h`, `audio/synth_engine.h`, `audio/audio_tables.h`, `audio/{governor,cpu_meter}.{h,cpp}`, `model/synth_patch.h`, `fastrun.h`, plus the 3.x headers the module engines need. Unmodified apart from a provenance line at the top (Apache section 4b) |
+| `ot-synths/` | The OpenTracker 3.x module engines from opentracker-synths (MIT), unmodified apart from a provenance line |
+| `stub_fmt.cpp` | `fmt::v9::vformat` replacement so the 37 KB `fmt/format.cc` is not linked |
+| `tools/host_smoke_test.cpp` | Host (Mac) smoke test of the shim, not firmware. It plays notes on every engine and checks finite, non-silent output, patch round trips, the id tables, the voice pool, the governor and the idle skip. Build line in the file header |
+| `tools/run_smoke.sh` | `run_smoke.sh "ACD VAP WTFM CHIP"` builds and runs the smoke test for an engine set (same names as `SYNTH_ENGINES`) |
+| `tools/engine_budget.sh` `.py` | Flash cost per engine from the link map, the image size against the cap, `BUILD.txt` |
+| `tools/phz_cycles/` `tools/phz_render.sh` | Emulated cycle bench for the engines and the WAV renderer for PHZ |
+| `tools/idle_cycles/` `tools/audio_opt/` | Emulated benches for the audio graph (see "Idle synth parts" and "Audio CPU optimisations") |
+| `tools/package_release.sh` `tools/check_ptf.py` | Release packaging and the `.ptf` sanity check that runs on every SYNTH_OPEN build |
+
+## What the shim does
+
+- `Instrument` hosts the OpenTracker `ISynthEngine` directly (OpenTracker's `SynthBank` is not linked). The voice cap is 4 per instrument (`Metadata::maxVoices`, see "Four voices per instrument") and there is one global pool shared by the three synth slots, default 4 and at most 8 (`open::setVoiceBudget`, no UI yet). Voice steal: a free voice, else the quietest released voice, else the oldest. With the pool full a new note takes the best victim over all slots (one in another slot fades out over its last block, no click). When the own cap is reached the steal happens inside the slot. With 1 voice a new note reuses the held voice, so the legato and overlap glide of ACD works.
+- MIDI: note on and off, velocity 0 is off, CC 102 to 107 are macros M1 to M6, CC 123 and 120 release all, Stop releases all. Pitch bend is implemented (see "Pitch bend"). Aftertouch and the held-note stack of a mono voice are not.
+- Parameters reach the engine as OpenTracker `SynthParams` (start and end ramp per 128 frame block), rebuilt from the patch every block while a voice sounds, so knob turns are heard live.
+- Gain: `Volume * (1 + k * (velocity - 1))` with k the amount of the Velocity macro on Volume (the OpenTracker law). Output is mono (`outputChannels = kMono`), the engine's L and R are averaged into the left buffer.
+- Edit curves (the knob law, our own because the stock ones are undocumented): cutoff and LFO rate geometric, envelope times cubic, glide time quadratic, the rest linear. The OpenTracker 3.x engines use linear curves except Hz and LFO Hz exponential and seconds cubic, because their descriptors carry no curve, so fine adjustments of a long time or a wide integer range are coarse on some knobs. Stepped values such as semitones, ratios and on/off are continuous on the knob and rounded in the text. The VAP and WTFM LFO Sync tempo divisions show as Hz. Default macros are the shim's own choice.
+- Not implemented: per-drum aux sends (`setSendTap` is never called, see PERC and T-Type) and aftertouch. The delay and reverb sends of a whole synth part do work (see "Synth delay and reverb sends on MK66").
+- The core is built with `FEATURE_SYNTH_OPEN`. Everything the shim changes in shared code sits behind that flag, `FW_TRIM` or SYNTH_OPEN make logic, so plain `make original` stays the stock firmware (see "Stock build").
+
+## Voice pool and governor
+
+`ot/audio/governor.{h,cpp}` and `cpu_meter.{h,cpp}` are OpenTracker's, unmodified (provenance line only). Control law as in `governor.h`: cut on overrun (load L >= 1000 permille), risk (L >= 980, or a second block >= 950 within 1 s) and average (A >= 800, deep 880), 250 ms hold-off after a cut, restore one voice after 2 s with A < 650 and every block < 900. Only synth voices are cut, sample voices never are. A governor steal fades the voice out over its last block (`SynthVoice::fading`).
+
+Block load source: tracker-ce already times every live audio block with the DWT cycle counter (`Profiler::startMeasuringAudio` and `stopMeasuringAudio` around `TrackerImpl::updateAudioBuffers`: midi, sequencer, engine update and the audio library update, so sample voices, FX and synths together, like OpenTracker's CpuMeter). Under `FEATURE_SYNTH_OPEN` `stopMeasuringAudio` also passes the raw cycle delta to `open::reportBlockCycles`, which feeds `CpuMeter::addBlock` (permille of 522,240 cycles = 128 frames at 44117.6 Hz and 180 MHz, same as OpenTracker) and `Governor::evaluate`. Both run in the audio interrupt at the end of the block, so a cut acts on the next block. The exporter calls `open::setOffline` (governor off, cap back to the budget) and transport Stop resets the cap. Project load (`Synth::updateToSettings(..., true)`) also resets it: `open::resetOnProjectLoad` cuts every voice and restarts governor and meter. Not done: a budget setting in the UI and the governor's telemetry on screen.
+
+The coloured line at the top of the screen is not the governor. `TitleBar::refresh` (`core/interface/core/titleBar.cpp`, a 170 x 1 px bar) shows it, only in builds with `GUI_HANDLE_SYNTH` (which `FEATURE_SYNTH_OPEN` turns on, the stock MK66 build has none). Every 300 ms it takes the largest audio block time of the period as a percentage of 2,902 us (128 frames) and draws yellow from 85 %, orange from 93 % and red from 99 % (`kPerformance1/2/3Treshold`, `titleBar.h`), hidden again after three quiet periods. It is the load the governor sees, so red means a block at the limit, an audible gap or one about to be. It was calibrated for the 600 MHz Tracker+, so on this CPU an average near 77 % keeps it yellow. The Config screen in dev mode shows min, max, avg and last of that load.
+
+## Four voices per instrument
+
+The Voices parameter of a synth slot goes up to 4: `kMaxVoicesPerInstrument` in `open_engine.h`, and every poly engine's `EngineDef::maxVoices` points at it. PERC and T-Type stay at 1 voice (the kit lives in the voice, `maxVoices = 1`, and the editor, `pickVoice` and the patch metadata cap them). The project field `voiceCount` is validated against 0 to 8 (`kSynthMaxVoices`, the sum over the 3 slots, so 4 + 4 + 0 is the most the Voices page offers) and the `.patch` format has no voice count, so projects saved with 1 or 2 voices load as before.
+
+The shared pool (default 4, max 8) and the governor stay the global limit. One slot can take the whole default pool, and three slots asking for 12 still sound 4.
+
+Memory is all SRAM (the libc heap and `.bss`, no big per voice buffer, the voice state is the 128 byte `SynthVoice::state`): `Voice` is 168 B, `OpenInstrument` is 1824 B (3 heap objects) and CHIP keeps one `ChiptuneSynthVoice` (276 B) per voice record, 12 objects in all (about 2.8 KB of heap with CHIP, 1.0 KB without).
+
+## Engines
+
+### Engine picker
+
+```
+make original SYNTH_OPEN=1                                     # default set ACD FAT VAP WTFM
+make original SYNTH_OPEN=1 SYNTH_ENGINES="ACD VAP WTFM CHIP"   # any subset of the 17 names below
+make synth-engines [SYNTH_ENGINES="..."]                       # flash cost of every engine and what fits on top of the selection
+```
+
+The 17 names are ACD FAT VAP WTFM PERC CHIP JU6 PHZ FM4 DTYPE CSTYPE ATYPE TTYPE 8TYPE HANDTYPE BTYPE ARCTYPE. They are case-insensitive, commas work too and the order does not matter (the model list on screen always runs in the order above). An unknown name or an empty list stops with the list of valid names. Unlisted engines are not compiled and not linked: their `engine_<name>.cpp`, OpenTracker sources, `ChiptuneSynthVoice.cpp`, list icons, registry entry and `kSynthTypes` entry are all out. Every engine set other than the default builds in its own directory (`core/build-MK66-ORIGINAL-SYNTHOPEN-E<names>`) because the engine list is a `-D` flag that the dependency files do not see. `make clean` removes them all.
+
+- One place per engine: a line in `engines.mk` (name, sources), one entry in `engine_list.h`, its `EngineDef` and sources.
+- Size guards: `FLASH_IMG_MAX` is 1,044,480 B (0xFF000, the last 4 KB sector stays free) and is checked three times: the post-build `size` check of the platform makefile and the linker ASSERT (both on text+data), and again in the top Makefile from the linked `.axf`, so a second `make` of an oversize set fails as well. An oversize set leaves no `.ptf` in `build/`. `SYNTH_FLASH_IMG_MAX=n` lowers the cap for one build. The real flash image is text + data. The FLASH line of ld leaves out the `.data` load image and is about 6.5 KB too optimistic.
+- The `.ptf` name is `PolyendTracker_<TAG>_<A.B.C>.ptf`, with TAG `FF` for TRIM builds (`PolyendTracker_FF_1.0.0.ptf`, 27 chars) and `SO` for plain SYNTH_OPEN builds. The firmware list (`platforms/mk66/3rdparty/SD/SD.cpp`) shows only names that start with `PolyendTrac`, are lowercase `.ptf` and are at least 15 chars long. The bootloader reads at most 31 chars. The engine list is in `build/BUILD.txt`, written next to the `.ptf` after a successful build (engines, image size, free bytes, bytes per engine from the link map).
+- `make synth-engines` links all engines once with the cap lifted for that one link, sums the input sections that survive `--gc-sections` per engine archive member and prints the cost per engine, the base without engines and the estimate for the selection. The estimate is within about 1 KB of a real link, the real size is always the one `make original` prints.
+- Projects store an engine as its canonical number, not as the position in the list on screen, so a project keeps its engines across builds with other engine sets: ACD 0, FAT 1, VAP 2, WTFM 3, PERC 4, DIRT 5, CHIP 6, JU6 7, PHZ 8, FM4 9, DTYPE 10, CSTYPE 11, ATYPE 12, TTYPE 13, 8TYPE 14, HANDTYPE 15, BTYPE 16, ARCTYPE 17. PERC is 4 and CHIP is 6 as in the stock Tracker+ and Mini CE list. A part whose engine the build lacks (DIRT, an engine left out) is reset to that part's defaults on load (`Synth::validateSynthPartSettings`, called from `fProjEdit.cpp` on the loaded project), with the first engine of the build when the default engine is not in it. The reset is made in the loaded project, so saving writes the default part over the original engine choice (the part's `Workspace/<N>.patch` file is not touched). Open such a project in a build that has the engine, or do not save it.
+- `.patch` engine numbers differ from the stored numbers on purpose, see "Patch files".
+
+### PERC
+
+PERC is the Tracker+ and Mini drum synth: one slot holds a whole kit (kick, tom, snare, hats, cymbal, percussion) and up to five drums ring at once. The engine is OpenTracker's `ot/audio/engines/perc.{h,cpp}` (Apache-2.0, unmodified copies). `engine_perc.cpp` has its 84 parameters in 8 sections (Kick, Toms, Snare, Hihat, Cymbal, Percussion, Mixer, FX) and 6 default macros.
+
+- Numbers: stored 4, `InstrumentTypeId::kDrumSynth` 6, `.patch` engine 6. Stored 6 is CHIP, which is not a clash because stored numbers live in project files and `.patch` numbers in `.patch` files.
+- Icons: `perc_mini_nomark` and `perc_med` (1,660 B) are compiled in when PERC or T-Type is picked (T-Type wears them, see "Engine icons").
+- Gaps: no Volume parameter (`volumeParam = -1`, Macro 7 and the framework gain carry the note velocity and the engine applies it per hit) and 1 voice (a slot is one kit). The per-drum Delay and Reverb sends are ignored because `percSetSendTap` is never called. Wiring them is not small: the firmware only takes aux sends from a stereo, `rendersAuxSends` patch (`synth_PolySynth.cpp` asserts `hasSends == isStereo`), so the shim would have to stop averaging L and R to mono for PERC, report `kStereo` plus `rendersAuxSends`, hand `setSendTap` the two aux buffers and the firmware stereo path has not run on this hardware.
+- The drum overlap, the per-hit velocity, the unmapped notes (61 63 68 70 play nothing) and the 6 drums at once are covered by the host smoke test. A single hit peaks at 0.5 to 0.9 and all six drums together reach about 1.4 (the firmware soft clips the slot).
+- Flash: 23.7 KB linked (22.1 KB code plus the 1.66 KB list icons).
+
+### CHIP
+
+`core/synth/engines/ChiptuneSynthVoice.cpp` stays Polyend's file. It gets a small `FEATURE_SYNTH_OPEN` block (a parameter switch with the same effect as the handlers in `createMetadata`, bend, reset, create) so the shim needs neither `Patch::Metadata`, `fmt` formatters nor the SDK registry path. `createChiptuneSynth()` is unused in this build and the linker drops it. `engine_chip.cpp` has the 25 parameters in the file's order, the 5 sections and the 6 default macros of `createMetadata`, and an `ISynthEngine` that keeps one voice object per shim voice record (at most 3 slots x 4 voices), pushes the parameters into it every block (Volume is applied by the shim as for the other engines) and feeds the shim's pitch bend. Objects are created once, outside the audio path.
+
+CPU: the first device run of CHIP on a pre-release build showed the red line at once. The voice called `powf`, `sinf`, `fmodf`, `roundf` and (for the drum model) `expf` per sample. Newlib's float libm costs about 380 cycles per `powf` on the M4F, so one voice took 229,082 cycles per 128 frame block at `-Os` (43.9 % of the 522,240 cycle budget). The fix, all under `FEATURE_SYNTH_OPEN` so the Tracker+ and Mini builds keep `std::`: exp2 and sine as polynomials (relative error 5e-9 and 7e-9, exp2 exact at integers), `round` and `fmod(x, 1)` as exact integer code, the pitch and the filter coefficient recomputed only when their input changes, and the vibrato sine skipped at depth 0. A held note with static pitch renders bit identical to the old voice, with moving pitch the difference is a few samples where the 6 bit quantiser flips.
+
+Emulated cost per voice per block, `-Os` / `-O2`: default patch 14.4 / 12.7 %, held in sustain 12.1 / 10.6 %, worst model (Super Square) 18.6 / 15.6 %. Four voices of the worst model are about 74 % (`-Os`), so CHIP is still the most expensive engine here. `SYNTH_OPT_CHIP=-O2` saves 12 % of that for +3.6 KB and would put the 17 engine image past the highest end known to boot, so the default stays `-Os`. Further savings would mean control rate updates of the filter coefficient, which changes the sound. The figures are emulated (no flash wait states), not read from a device.
+
+### PHZ
+
+PHZ is the Polyend Synth's dual phase distortion engine (Casio CZ style), which exists only in Polyend's closed code. This one is written from the public manual (SYN2 p.76 to 80) and nothing else. No Polyend binary or library was opened. The DSP is our own (`phz/phz.cpp`). The voice skeleton (block rate envelopes, LFOs, glide, mod matrix ramps, the TPT filter stages) follows OpenTracker's VAP engine (Apache-2.0). No Mutable Instruments Plaits code is in it, see the header of `phz/phz.cpp`.
+
+- 62 parameters in the page order of the manual: Oscillator 1 to 3 (Shape 1/2, Mix, Osc1/2 XMod, Osc1/2 YMod, Model, Reset 1/2, Detune, Tune 1/2, Finetune, Character 1/2, Glide Mode, Glide Time, Volume), Filter (Cutoff, Resonance, Type, Env Amount, Note Track), Amp, Filter and Aux envelopes, LFO 1 and 2 (Sync, Ratio, Waveform, Retrigger) and 6 mod slots. 10 sections and 6 default macros (Cutoff, Resonance, Timbre = both X, Bend = both Y, Mix, Detune).
+- One oscillator: a phase ramp goes through the phase distortion map of the Model (OG Saw, OG Square, Hermite Smooth, Squared, Linear, Hermite FM), controlled by X and Y, and a cosine based cycle reads it. Character picks the cycle family (Smoother, Sharper, Wilder, Add 1/2/3/5/7/11) and Shape moves along it. The 15 filter types are the VAP set. Cutoff at the top is "Off" (no filter, the cheap path).
+- What follows the manual and what is a guess: the parameter names, ranges, enum names, page order and the model descriptions follow the manual. The map formulas, the Character rows, every default, the mod destinations, the edit curves and the macros are our own.
+- CPU (Cortex-M4F, 128 frame block = 522,240 cycles at 180 MHz, `tools/phz_cycles/run_bench.sh`, an emulated instruction count with a cycle cost table, not hardware): default patch 22.6k cycles = 4.3 % of a block per voice, Cutoff Off 3.4 %, worst case measured (Hermite FM, Wilder x2, saturating 24 dB filter, six mod slots) 5.9 %. PHZ is built `-O2 -ffp-contract=off` (`SYNTH_OPT_PHZ` in `core/makefile`, fused multiply add costs 3 cycles on the M4F, and at `-Os` the worst case is 7.6 %). Per block code is `-Os`. CPU is secondary for PHZ, sound quality is never traded for it.
+- Flash: 15.3 KB linked (13.6 KB code and data plus the 1.66 KB PHZ list icons).
+- Listen to it without the device: `tools/phz_render.sh [outdir]` renders X and Y sweeps for every model, a Shape sweep for every Character and four small patches to WAV files (default `build/phz-wav`, mono 16 bit 44118 Hz).
+- Not done: no anti aliasing beyond limiting the steepness of the maps with pitch (a hard setting on a high note aliases), Linear and the Hermite models carry a DC offset up to about 0.2, the LFO Ratio shows Hz even with Sync On (as VAP).
+
+### JU6 and the other OpenTracker 3.x engines
+
+`ot-synths/<module>/<module>.{cpp,h}` are opentracker-synths files (`eb150a5f741b`, MIT) unmodified apart from a provenance line. They need the 3.x `audio/synth_engine.h` (adds `slotPost`, `SynthHeld`, `cutoffOct`), `audio/bbd_chorus.h` and the DSP headers `ot/audio/{chip,fm,va}_dsp.h` from OpenTracker `v3_fixes` (Apache-2.0, provenance lines added). Each engine has one `engine_<module>.cpp` with the `EngineDef` written from the module's descriptor (ranges, defaults, labels, value formats, enum names, sections, six default macros and curves by value format).
+
+JU6 has a slot effect (chorus). With an engine that sets `EngineDef::slotFx` the instrument renders its voices into a private bus, runs `slotPost(slot, ...)` on it, adds the result to the mix and keeps rendering while the effect reports a tail. That path is compiled only when JU6 is picked (`OPEN_SLOT_FX`, about 0.4 KB). `SynthHeld` is never filled (only A-Type reads it) and `cutoffOct` stays 0 (the Performance filter offset, JU6 does not read it).
+
+| Engine (name in picker) | stored | id / `.patch` | params | sections | voices | linked (B) |
+|---|---:|---|---:|---:|---|---:|
+| JU6 | 7 | 0x81 | 23 | 6 | 4 | 6,108 |
+| FM4 | 9 | 0x80 | 43 | 6 | 4 | 7,291 |
+| D-Type (DTYPE) | 10 | 0xA2 | 35 | 9 | 4 | 9,869 |
+| CS-Type (CSTYPE) | 11 | 0x83 | 67 | 9 | 4 | 10,507 |
+| A-Type (ATYPE) | 12 | 0x84 | 46 | 8 | 4 | 9,989 |
+| T-Type drums (TTYPE) | 13 | 0x85 | 73 | 9 | 1 (kit) | 14,001 |
+| 8-Type (8TYPE) | 14 | 0x86 | 56 | 7 | 4 | 15,474 |
+| Hand-Type (HANDTYPE) | 15 | 0x87 | 52 | 8 | 4 | 9,140 |
+| B-Type (BTYPE) | 16 | 0x88 | 27 | 5 | 4 | 9,740 |
+| Arc-Type (ARCTYPE) | 17 | 0x89 | 62 | 8 | 4 | 13,939 |
+
+The on-screen names are the picker names (`DTYPE`, `HANDTYPE` and so on), not OpenTracker's "D-Type". The folder `Patches/<NAME>/` and the model list use the same string. The model list scrolls (7 rows) and the widest names (HANDTYPE, ARCTYPE) were not looked at on a device. The engines keep their state in the slot scratch (384 B, `static_assert`ed in each engine) and the voice state, so the only static RAM is T-Type's send tap pointers (48 B), JU6's chorus lines (1,536 B) and about 10 B of `.data` per engine. They compile at `SYNTH_OPT_ENGINES` (`-Os`) and none needed `-O2`.
+
+What the host smoke test checks for every engine: the Init patch sounds (finite, non silent), a sweep of every parameter to its far end changes the output for a share of them (at least 3 and a fifth of the parameters, the ones that do not change it at the Init patch are things like a muted operator or a section behind a switch), velocity 32 and 127 both sound and the level follows velocity, a second note makes 2 voices (1 for T-Type) and a fifth note steals, a patch save and load round trip and ids that are unique and equal to the poly-editor's table. Known gaps, not features invented to hide them:
+
+- **A-Type**: the Keyboard "Duo" mode (VCO 1 follows the lowest and VCO 2 the highest held note on a Poly 1 slot) and the Poly 1 note priority (Priority: Last, Low or High) read `SynthParams::held`, which this shim never fills (the held-note registry of OpenTracker's `SynthBank` is not ported). Both parameters show and save, but Duo plays like Normal and the priority is always Last.
+- **T-Type**: a drum kit like PERC, one voice per instrument, polyphony does not apply. Note map (`drumForNote`): 60 kick, 61 rim, 62 snare, 63 and 71 clap, 64 to 67 hat (closed to open), 68 cowbell, 69 crash, 70 ride, 48 to 59 the three toms (4 semitones each, the notes between detune the tom), below 48 the low tom, 72 and up wrap onto 60 to 71. Velocity is the Accent parameter's share. The 22 Sends parameters (per drum delay and reverb send) do nothing, as for PERC. The kit cost governor (`kitCost`) is on.
+- **D-Type id**: its OpenTracker id 0x82 is PHZ's, so D-Type is keyed 0xA2 (type id and `.patch` engine id), the same as the poly-editor stores it, so a D-Type patch saved by the editor loads on the device.
+- None of the OpenTracker 3.x engines has been heard on a device.
+
+### CPU at four voices
+
+Emulated with `tools/phz_cycles/run_bench.sh fw <ENGINE>` (522,240 cycles per block, firmware flags per engine, no flash wait states, the shim's own mixing and the rest of the tracker's block not included). The bench renders the voices as the shim does (4 voices playing the chord 57 61 64 68, `slotPost` for JU6). Kit engines (PERC, T-Type) are one voice that gets 5 hits every 8 blocks. "Worst" is the most expensive of: default patch, every parameter at its max, at its middle (voices still alive) and, for CHIP, each model. Percent of a block:
+
+| engine | 4 voices, default patch | 4 voices, worst | note |
+|---|---:|---:|---|
+| ACD | 12.8 | 24.9 | |
+| FAT | 13.7 | 22.7 | |
+| VAP | 13.2 | 18.7 | |
+| WTFM | 16.1 | 52.0 | |
+| PERC | 13.8 | 13.8 | 1 voice, 5 hits |
+| CHIP | 57.9 | 82.0 | over the governor's 80 % average line on its own |
+| JU6 | 21.1 | 24.0 | with chorus |
+| PHZ | 17.4 | 23.5 | worst model x 4 from the dedicated bench (5.87 %) |
+| FM4 | 32.5 | 32.6 | |
+| D-Type | 27.0 | 42.8 | |
+| CS-Type | 46.8 | 74.9 | close to the line |
+| A-Type | 27.3 | 37.0 | |
+| T-Type | 10.9 | 11.2 | 1 voice, kit |
+| 8-Type | 24.3 | 61.4 | |
+| Hand-Type | 12.2 | 12.7 | |
+| B-Type | 14.1 | 21.8 | |
+| Arc-Type | 33.2 | 41.7 | |
+
+Read against the governor (cuts at a block >= 98 to 100 %, or an average >= 80 %): with the default pool of 4, one slot at 4 voices or three slots sharing 4 sound at most 4 voices, so the worst total is the 4 voice figure of the dearest engine. CHIP overloads alone (CS-Type worst at 75 % and 8-Type worst at 61 % are next) and leans on the governor, the rest fit with room. Three slots each asking for 4 voices is 12 voices on paper, 3 x the figures above, which only the pool (4) keeps from happening. Raising the pool budget to 8 would overload the same engines. Not measured on a device.
+
+## Engine icons
+
+The list and editor icons are lettered name logos (80x29 mini and 108x40 medium pills that spell ACD, FAT, VAP, WTFM, PERC, CHIP and PHZ), not pictures. There is no artwork for the OpenTracker engines, so each one wears the logo of the Polyend engine closest in character (`engine_list.h`, MINI_ICON and ICON). Only the stored ids and `.patch` numbers matter for files, the icon is display only. All seven logos are linked in the 17 engine image already, so this mapping costs no flash. DIRT (shaping, no open engine) and its Shaper glyph stay out.
+
+| Engine | Icon | Why |
+|---|---|---|
+| ACD, FAT, VAP, WTFM, PERC, CHIP, PHZ | own | |
+| JU6 | VAP | Juno-style poly virtual analog with chorus |
+| FM4 | WTFM | four-operator FM |
+| D-Type | ACD | mono three-VCO bass and lead voice, the monophonic analog logo |
+| CS-Type | FAT | two-layer big polysynth, the fat analog logo |
+| A-Type | ACD | duophonic mono-style lead, the monophonic analog logo |
+| T-Type | PERC | analog drum machine, the percussion logo |
+| 8-Type | CHIP | three-voice 8-bit computer chip |
+| Hand-Type | CHIP | four-channel handheld console chip |
+| B-Type | CHIP | polynomial counter 8-bit chip |
+| Arc-Type | WTFM | four-operator FM console chip, the FM character wins over the chip label |
+
+A logo is built in when any engine that wears it is picked: `FW_ICON_PERC` (PERC, T-Type) and `FW_ICON_CHIP` (CHIP, 8-Type, Hand-Type, B-Type) in `displayStructs.h`. When an icon is gated by `FW_TRIM` the test is `(!FW_TRIM || SYNTH_ENGINE_X)`, so plain builds stay byte identical.
+
+## Patch files
+
+`open_patchio.cpp` reads and writes the stock `.patch` format (a protobuf `Patch` message, as the Tracker Mini and OpenTracker use it). `PatchStore` (in `open_cold.cpp`) puts it on the SD card through the `FileSystem` the firmware registers:
+
+- Library: `Patches/<ENGINE>/<name>.patch`, one folder per engine (`ACD FAT VAP WTFM PERC CHIP JU6 PHZ FM4 DTYPE CSTYPE ATYPE TTYPE 8TYPE HANDTYPE BTYPE ARCTYPE`), created on first save. The patch browser lists the names of the current engine sorted, without `.patch`.
+- Workspace: `Workspace/<N>.patch` for the three slots. The firmware already writes edited patches there (`saveDirtyWorkspacePatches`), copies them into the project folder on project save and back on project open (`copyWorkspacePatches`), so a project reload keeps the edits.
+- The file holds the engine id, all parameters (stored values, same indices as the editor), eight macros (name, bipolar, up to six targets with parameter and amount, M7 Velocity and M8 Pressure included) and the constant `Extra` block. Names, the OpenTracker extension field and unknown fields are kept as raw bytes and written back (up to 768 B), so loading and saving does not drop them.
+- A load needs the same engine as the patch it goes into and a file of at most 8 KB. A parameter that is missing, not finite or out of range takes its default. A file cut inside a field is refused and the patch is left as it was. The apply runs with audio interrupts off. A patch of an engine the build lacks is refused. Saving is not atomic (no temp file and rename).
+- Engine numbers in field 1: Polyend's `InstrumentTypeId` for the Polyend engines (PERC is 6 `kDrumSynth`, CHIP is 8, so the PERC and CHIP patches of Tracker+ and Mini CE are the right format and order) or OpenTracker's engine id (JU6 is 0x81, the same as OpenTracker 3.x `Patches/JU6/`). PHZ is 0x82, our own number, so Polyend's Synth PHZ patches (id unknown) are refused. FM4 is 0x80, CS-Type to Arc-Type are 0x83 to 0x89 and D-Type is 0xA2 (see above). The stored numbers 9 to 17 are the poly-editor's as well. There are two numbers per engine, the stored one (project files, `engine_list.h` column STORED: PERC 4, CHIP 6) and the `.patch` one (PERC 6, CHIP 8). They differ on purpose and each lives in its own file type. The smoke test pins the table and checks that the three numbers (stored, type id, `.patch` engine) are unique and map back for every picked engine.
+- Verified on the host: save then load gives equal parameters and macros for every engine, load then save gives the same bytes. With OpenTracker's own `patch_pb.cpp` as oracle (not in the repository, `-DOT_ORACLE`, see the test header) its Init patches load here and save back byte for byte and OpenTracker re-encodes our files identically. Polyend Mini factory `.patch` files load and play on a device (confirmed on an original Tracker with a pre-release build).
+
+## Pitch bend
+
+`MidiEvent::kPitchBendChange` (from a MIDI keyboard through the virtual port and from the tracker's Micro-tune FX, which `mtSequencer` sends as a full +-8192 bend to synth instruments) sets the instrument's bend, applied to every voice of the slot through `SynthVoice::bend` (ramped over the block from `bendStart`). The range is +-1 semitone at full deflection, our own choice, so the Micro-tune FX reads in cents (-99 to +99). The range of the closed firmware is not known. Transport Stop resets the bend to 0.
+
+## Flash trim (TRIM=1)
+
+`TRIM=1` is an opt-in build switch for the "no feature loss" trims. It frees about 157 KB of the original's 1 MB flash, which is what lets all 17 engines link. The plain build is untouched, and `TRIM=1` without `SYNTH_OPEN=1` is an error (stock `make original` has no trims, by design).
+
+```
+make original SYNTH_OPEN=1 TRIM=1 \
+  SYNTH_ENGINES="ACD FAT VAP WTFM PERC CHIP JU6 PHZ FM4 DTYPE CSTYPE ATYPE TTYPE 8TYPE HANDTYPE BTYPE ARCTYPE"
+make synth-engines TRIM=1 [SYNTH_ENGINES="..."]   # budget table of the trim image
+```
+
+What it does:
+
+1. The platform link line gets `-specs=nano.specs -Xlinker -u -Xlinker _printf_float` (`platforms/mk66/makefile`). The compile flags already said nano, the stock link line did not, so the image carried full newlib (printf 6.9 KB, scanf 6.0 KB, strtod/dtoa 13 KB) and the full libstdc++ (cp-demangle 28 KB through the verbose terminate handler). `%f` stays (about 50 UI call sites), scanf float is not needed.
+2. `InstrumentTypeRegistry.h` uses `std::map` instead of `std::unordered_map` (`POLYSYNTH_REGISTRY_MAP`, only lookups by id).
+3. Float instead of double math at 6 call sites: `cosf` and `tanf` in `mtEffectEQ.cpp`, `expf` in `mtEffectOverdrive.cpp`, `value == floorf(value)` in `fSongEdit.cpp` and `powf` in `control_sgtl5000.cpp` (MK66 copy). This drops pow, exp, fmod, remainder and the trig kernels from libm.
+4. The PERC icons are out of the bitmap table unless PERC or T-Type is picked (`FW_ICON_PERC`), and the other lettered icons follow the same rule.
+5. `-Os` (appended after `-O2`, per-path pattern rules `TRIM_OS_PATHS` in `core/makefile`) for `interface FileManager libs/NewDisplay effector Exporter synth source` and for the whole MK66 platform (teensy core, FatFs, SDMMC, USB, I2S). A list of `AudioEngine` files that run once at start or once per event, not per block, is also `-Os` (`TRIM_OS_FILES`: AudioInput, MixerAndFxs, AudioVoice, AudioOutput, ExportQueues, mtAudioPerformanceMode, mtAudioNoteOnHandle and mtAudioSequencer). The sequencer entry is the one that paid for the merge of upstream's relicense and file hardening. Only the note on handler of that file runs in the sequencer interrupt, a few hundred cycles per note at worst. Not touched: the per-block audio code in `AudioEngine`, `libs/Audio` and the engine DSP, which keeps its own flags (`SYNTH_OPT_ENGINES` `-Os`, FAT `-O2`, PHZ `-O2 -ffp-contract=off`, an explicit per-object `EXTRA_OPT` wins over the TRIM pattern rules).
+6. `platforms/mk66/source/fastmem.S`, a word-wise `memcpy` and `memset`, see "Idle audio load".
+
+Source level trims sit behind `-DFW_TRIM`. TRIM uses its own build directories (`core/build-MK66-ORIGINAL-SYNTHOPEN[-E<names>]-trim` and `platforms/mk66/build-trim`) so trim and plain objects never mix. Not in TRIM: LTO, font recompression, a printf replacement and any feature removal. The three size guards and `make synth-engines` all work with TRIM=1.
+
+The cold shim code is split for the same reason: `open_synth.cpp` keeps the render path (instrument, voice pool, `OpenPatch::effective`) at `-O2`, and everything else (`open_cold.cpp`, `open_patchio.cpp`, `stub_fmt.cpp`) is built at `-Os` (`SYNTH_OPT_COLD`). The knobs `SYNTH_OPT_ENGINES`, `SYNTH_OPT_GUI`, `SYNTH_OPT_SHIM`, `SYNTH_OPT_COLD`, `SYNTH_OPT_FAT`, `SYNTH_OPT_CHIP` and `SYNTH_OPT_PHZ` set the `-O` level of each file group. A stray `<iostream>` anywhere pulls about 150 KB of locale code on MK66, so after a change `nm` the `.axf` for `std::locale`.
+
+### Flash budget of the 1.0.0 image
+
+Sizes are text+data from `arm-none-eabi-size` against the cap of 1,044,480 B, toolchain 10.3.
+
+| Build | text+data | free | highest .ptf address |
+|---|---:|---:|---|
+| `SYNTH_OPEN=1 TRIM=1`, all 17 engines (the 1.0.0 release image) | 1,030,080 | 14,400 | 0xFB7C0 |
+
+The highest image end known to boot on a device is 0xFC2AC (1,032,876 B, an early pre-release image), so the 1.0.0 image ends 2,796 B below it. Without TRIM the 17 engine set does not link. The flash cost of each engine in the 17 engine TRIM link (`make synth-engines TRIM=1`, within about 1 KB of the real marginal cost) is ACD 9,374, FAT 12,952, VAP 15,514, WTFM 14,793, PERC 23,631, CHIP 10,685, JU6 6,108, PHZ 15,154, FM4 7,291, DTYPE 9,869, CSTYPE 10,507, ATYPE 9,989, TTYPE 14,001, 8TYPE 15,474, HANDTYPE 9,140, BTYPE 9,740 and ARCTYPE 13,939 B, with a base of about 824,700 B without engines. Re-run the target for exact figures, they move with every merge.
+
+RAM of the 17 engine TRIM image (`-print-memory-usage`): about 139.3 KB of 256 KB (`.data` 5.7 KB, `.bss` 110.2 KB, `.dmabuffers` 20.7 KB) and about 15.6 MB of the 16 MB SDRAM. Static RAM of the engine objects: JU6 1,536 B (chorus lines), T-Type 48 B and PERC 48 B, the other engines 0 B of `.bss` and 8 to 12 B of `.data`. The remaining flash levers, none of them needed now: a printf smaller than nano's float one (about 7.5 KB) and font recompression.
+
+Known risks of TRIM that a device run has to keep an eye on: nano malloc and nano stdio replace newlib's (`Profiler.cpp` and the Arduino `String` class use malloc and `%f` goes through the nano float printf), and `-Os` on `source/` and on the platform (ISRs, SD read speed) and the `powf`, `cosf` and `tanf` coefficients (tiny numeric drift in the EQ and the SGTL5000 constants) have not been listened to separately.
+
+### Idle audio load
+
+Observed on an original Tracker with pre-release builds of this design (`/.develop` readout, same project, sample tracks only): stock CE read min 53 % and max about 80 %, a first TRIM image read min 68 % and max about 110 %. `-Os` was not the cause, because stock CE built with exactly TRIM's `-Os` read the same as stock.
+
+Cause: newlib-nano's `memcpy` and `memset` are byte loops. The stock link has no `-specs=nano.specs` and gets newlib's word-wise ones (memcpy 308 B, memset 164 B), while TRIM links nano (memcpy 28 B: `ldrb`, `strb`, `cmp`, `bne`). Emulated on a Cortex-M4 with the cost model of `tools/phz_cycles` (Unicorn, no flash wait states):
+
+| call | nano | stock newlib | fastmem.S |
+| --- | --- | --- | --- |
+| memcpy 256 B (one audio block) | 2,063 cycles | 295 | 282 |
+| memset 512 B (a muted int32 mixer channel) | 4,618 | 335 | 352 |
+
+The audio interrupt calls them every block (the whole block is 522,240 cycles): `AudioStream::receiveWritable` (256 B copy of every shared block), `MonoToStereo::update` (every active voice), the bypass copy of `AudioFilterStateVariable::update`, `AudioOutputStream::update` (three 256 B copies or clears), `applyGain` and `applyGainAndCopy` (clear of a muted channel) and the envelope clears. Three 256 B copies per playing voice cost about 5.3 k cycles more than stock, so 8 playing tracks are about 8 points of a block before the mixer and output stages.
+
+Fix: `platforms/mk66/source/fastmem.S`, word-wise `memcpy` and `memset` (ldm and stm, 4 words per iteration, byte loop for a misaligned pointer, +98 B), linked only with `TRIM=1` (`TRIM_FASTMEM=0` leaves it out for comparison builds). Checked in Unicorn against both libcs: 12,000 random cases per implementation (size 0 to 600, all source and destination offsets 0 to 7, fill values with high bits set, guard bytes before and after, r4 and r5 preserved). `memmove`, `memcmp` and `strlen` stay nano's, they are not on the audio path. The teensy_core `memcpy-armv7m.S` and `memset.S` are guarded by `__OPTIMIZE_SIZE__` and the platform `.S` rule passes no `-O`, so they assemble to empty objects in every build.
+
+Ruled out in code: the `FW_TRIM` float math (it runs at init, and `expf` instead of `exp` is cheaper), libm (nano.specs does not change it), data placement (no hot object moved between flash, SRAM and SDRAM) and code placement (no audio code runs from RAM in either build, `.audio_ram_functions` has no effect on MK66).
+
+### Idle synth parts
+
+Observed on a pre-release SYNTH_OPEN build without TRIM and with ACD only (`/.develop` readout, same project, no synth notes): stock CE min about 43 % and max 80 %, the synth build min 52 %, avg 77 % and max 100 %, with the top bar yellow all the time.
+
+Cause: `PolySynth::update` (`core/libs/Audio/synth_PolySynth.cpp`) only skipped a part whose `getVoiceCount()` is 0. A part that is allowed a voice but has none sounding (Voices 1 is the default: `kDefaultSettings` in `core/synth/Synth.cpp`, `Synth::init` and a new project) went the whole way every block: 2 block allocations, `renderAudioBuffer` (clears of 4 x 128 floats, mono mix down), `saturateSoftClip` twice at the default -9 dB gain (a `powf`, a clamp, a cube and a `VDIV` per sample), the copy and the float to int16 conversions, then 4 transmits of blocks of zeros. Those blocks made six panning amplifiers, six RMS analysers and the six extra mixer inputs (the `AudioMixer<11>` that stock has as `<8>`) do real work.
+
+Emulated cost of one `update_all` (`tools/idle_cycles/run_bench.sh`, real AudioStream, amplifier, RMS, mixer and applyGain code, `PolySynth::update` as a literal copy with the Synth stubbed, Unicorn Cortex-M4F with the cost table of `tools/phz_cycles`, **no flash wait states, not the device**, 522,240 cycles per block):
+
+| 3 synth parts | cycles | % of a block |
+| --- | --- | --- |
+| no synth objects in the graph | 8,270 | 1.58 |
+| Voices 0 (stock `continue`), or Voices 1 idle with the fix | 9,064 to 9,138 | 1.74 to 1.75 |
+| Voices 1, nothing sounding, 0 dB part gain, before the fix | 57,898 | 11.09 |
+| Voices 1, nothing sounding, -9 dB part gain (default), before the fix | 82,390 | 15.78 |
+
+So an idle part with a voice allowed cost 9.5 to 14.2 points of a block for the three parts. What stays with the fix is about 800 cycles (0.15 points): 13 active objects that find no input and `AudioMixer<11>` instead of `<8>`.
+
+Fix: `open::partIdle(part)` (`open_load.h`, `open_synth.cpp`) answers with the test `OpenInstrument::render` already used for its early return (no engine or patch, Voices 0, no voice on, no slot effect tail). `PolySynth::update` skips such a part with `continue` and transmits nothing, and a missing block is silence for the amplifiers, analysers and mixers. Offline render keeps the old path (`AudioStream::renderMode`), so exported stems are unchanged. `updateSynthParams` skips a part with no dirty parameter flag with one `none()`. The host smoke test covers it (idle with a voice allowed, not idle on note on, held and in the release, idle again after the tail, Voices 0).
+
+Other things looked at and ruled out as the floor: `Profiler::stopMeasuringAudio` calls `reportBlockCycles` after the readout value is taken, so `CpuMeter::addBlock` and `Governor::evaluate` (a 64 bit divide and a walk of at most 12 voice records, a few hundred cycles) are real ISR time but not in min, max or avg. Data placement against stock showed no hot object moving between SRAM and SDRAM.
+
+## Audio CPU optimisations
+
+These remove work the stock firmware does for silence. The basis is a DWT profile of stock CE on a test song on an original Tracker: avg 66 %, max 86 %, stopped 56 % of a 522,240 cycle block. Always-on cost measured on the device: `Reverb(polyverb)` 94.8 k cycles (18.1 %, constant, even stopped), `Delay(short)` 28 k, both limiters 22 k, mixers 52 k and idle voice chains about 7 points. All of it is behind `FEATURE_SYNTH_OPEN` (or `FW_REVERB_SRAM`), plain `make original` is the stock image. Five changes follow in the order they build on each other.
+
+Evidence tool: `synth-open/tools/audio_opt/run_graph.sh`. It compiles the real library objects of the graph (AudioStream, BitDepth, Filter, Amplifier, MonoToStereo, RMS, all mixer sizes, Limiter, Mux, ShortDelay, Polyverb, OutputStream and RecordQueue as the export taps) from any source tree (working tree or `git archive` snapshot) with the firmware compiler and flags, wires them like `core/AudioEngine` does and runs a scripted scenario in a Unicorn Cortex-M4F. Only the voice source is a stand-in (its idle branch is the one of `AudioPlayMemory::envelopeUpdate`). Everything that leaves the graph is compared byte for byte between two builds: the output stream buffers, a hash of every block drained from the export queues, and the RMS and limiter meters. Scenario 0 is a 3000 block "song" (random notes on 8 voices, random gain, pan, filter, overdrive, bit depth, send, mixer, delay, reverb, sidechain and export tap changes, long idle stretches), scenario 1 repeats bursts and long silences with short tails, and scenarios 2 to 7 cover idle, playing with and without sends, filters settling, loud bursts with sidechain switching and sounding synth sends. `mutate.sh` builds a deliberately broken variant of the tree so the bench can be shown to catch it. Usage is in the header of `run_graph.sh` (`build`, `run`, `cmp`, `cycles` and `git`). The cycle numbers are emulated Thumb-2 instruction cycles (cost table of `tools/phz_cycles`) with **no flash or SDRAM wait states**, so they are estimates and not device measurements.
+
+### Reverb in SRAM
+
+`AudioEffectPolyverb` has two 16384 x int16 line buffers (32 KB each): E (`internalRamReverbBuff`, `__NOINIT(EXTERNAL_RAM)` on the MK66 although it is named internal and is `.noinit` SRAM on the Tracker+) and E2 (`externalRamReverbBuff`, `.reverb_memory`). Both sit in the 90 MHz SDRAM with no data cache. Per output sample the reverb makes 12 reads and 11 writes (E: 8 + 8, E2: 4 + 3), 2944 accesses per block. `REVERB_SRAM=<n>` (`core/makefile`, `-DFW_REVERB_SRAM`, default 1 for SYNTH_OPEN builds):
+
+| REVERB_SRAM | placement | accesses off the SDRAM per block | RAM left for heap + stack (17 engines) |
+| --- | --- | --- | --- |
+| 0 | E and E2 in SDRAM (stock) | 0 | 122,808 B |
+| 1 (default) | E in SRAM (`.noinit`), E2 in SDRAM | 2048 of 2944 (70 %) | 90,040 B |
+| 2 | E and E2 in SRAM | 2944 (100 %) | 57,272 B |
+
+Why 1 and not 2: the MK66 has 256 KB of SRAM and no TCM, `_sbrk` stops 8 KB below the stack and a device profile showed `arena=92636` (the whole malloc space, `Profiler::init` claims all of it) with 15.7 KB in use on the stock image. Moving both buffers leaves about 57 KB for heap and stack, 8 KB of that is the `_sbrk` margin and the project explorer lists (256 entries x up to 255 chars), the sample import, the exporter and the synth patch editor allocate on demand. One buffer leaves 90 KB. Smaller buffers are not an option: the live window of E is 15,591 of 16,384 entries and of E2 11,037, a modulus other than the power of two costs a `udiv` per access and saves little, and the output stays bit exact only with an unchanged index sequence. The move is bit identical by construction (same arithmetic, same size, only the address changes) and was checked with scenarios 0 and 1 (3000 blocks each) for SDRAM placement against `REVERB_SRAM=1` and `=2`. A define is not a make dependency, so build a `REVERB_SRAM` variant with its own `SYNTH_TAG` or wipe the object dir.
+
+Estimated saving: the bench gives the reverb 45,149 emulated instruction cycles per block without wait states and the device measured 94,779. The difference, 49.6 k cycles over 2944 SDRAM accesses, is 16.9 cycles per access (an upper bound because it blames the whole difference on SDRAM, a lower bound assumes 12). E in SRAM removes 2048 accesses, which is **about 24 k to 35 k cycles per block (4.6 to 6.6 points) on every block, playing or stopped**.
+
+### Idle voices send nothing
+
+`AUDIO_NULL_IS_SILENCE` (`AudioStream.h`, defined with `FEATURE_SYNTH_OPEN`). `AudioPlayMemory::envelopeUpdate` with an idle envelope used to allocate, memset and transmit a block of zeros, so bit depth, filter, amplifier, mono to stereo, the meter, six mixers and the 22 export taps all processed 8 voices of silence. Now it transmits nothing. The rule for every consumer is "exactly what a block of zeros would have done, state included":
+
+| object | NULL in | why it is not just `return` |
+|---|---|---|
+| AudioBitDepth, AudioMux, AudioOutputStream, AudioDelay (zeroblock) | as before | no state, or already NULL safe |
+| AudioAnalyzeRMS | as before (`count++`) | a zero block adds 0 to the sum and 1 to the count, the same |
+| AudioAmplifier, MonoToStereo, AudioMixer | no output, and `previous = target` per gain | `applyGain*` ends the gain ramp on any block, so a gain changed while the voice was idle must not ramp on the next note |
+| AudioFilterStateVariable | bypass: `inputprev = outputprev = 0`. Enabled: skip when all states are 0 (and move `lastupdate_fmult/damp` like `update_fixed` does) or when one sample of silence leaves the state unchanged with a zero output (`isSettledOnSilence`, the fixed point arithmetic has a dead band). Otherwise run a real block of zeros | the filter keeps ringing after a note and the zero block is what decays it |
+| AudioEffectLimiter | skip only when the peak detector is 0, the gain is exactly 1.0f, the look-ahead delay is empty and there is no sidechain block. It then sets the meter (`averageGain` 1.0). Otherwise run a block of zeros | its release and 5 sample delay still have to play out |
+| AudioRecordQueue (export taps) | enabled: queue a block of zeros | the exporter counts blocks and a missing one ends a render (`handleStem`, `mtAudioExport.cpp`) |
+| AudioEffectPolyverb | allocates a block of zeros for each missing input and runs as before | stock returned on a missing left input without reading the right one |
+
+Bit identity against the stock graph with zero-block idle voices: scenarios 0 to 5 (3000 blocks, all the changes in the script above, export taps on and off) give identical output stream, export queue hashes and meters. The bench is sensitive to every rule above: mutants of the amplifier, mono to stereo, both mixer paths, the record queue, the polyverb and four filter rules each make a scenario fail.
+
+Flash: the five object changes cost 808 B. Paid back with `-Os` for the graph construction and event glue objects (`TRIM_OS_FILES`, see "Flash trim"): -3,480 B.
+
+Emulated cost per block (**estimated**): all 8 voices idle 161,420 to 112,163 cycles (-9.4 points), 3 voices playing with fx sends -5.0 points, 3 playing with zero sends -3.6 points, idle after a burst with 8 filters on -14.2 points (the filters are skipped as soon as they settle), silence after the fx tails with the export taps on -17.9 points, 4 voices bursting with fx -3.8 points. From the device profile (IDLE section, stopped, wait states included): the idle chain objects measured 42.6 k and the four mixer kinds 54.8 k, of which about 38 k (Tracks, PreFx) become 1 k, so **about 70 to 80 k, 13 to 15 points when stopped**. The saving is per idle voice (about 5 k each) plus the share of the mixers, so it is smaller when more tracks play.
+
+### Reverb and short delay sleep when silent
+
+All of it is behind `AUDIO_NULL_IS_SILENCE`. A skipped block transmits nothing (NULL), so the tracks and sends mixer, both limiters and the final mixer see NULL as well and fall asleep with them.
+
+**Short delay** (`effect_shortDelay.cpp`, bit exact by construction): skip when the input is NULL or all zero, the delay time is at least 1 sample, the values written to the three lines (right, left, mono) were all zero for at least `timeInSamples` samples in a row (the whole delay window is zero, counted per block, `quietSamplesCount`) and the six filter states are zero. What `process()` would then do is write 128 zeros per line, move the head and count 128 silent samples, and the skip does exactly that (`silentSamplesCount += 128`, so `isSilent()` for the exporter stays right). The loop with the quiet bookkeeping runs only for silent input (`processBlock<true>`).
+
+**Reverb** (`reverb.h`, `effect_polyverb.cpp`): skip when both inputs are NULL or all zero and the reverb is quiet. Quiet means that for 16,384 samples in a row (one buffer length, the input path with predelay is at most 6,210 samples and the longest line 15,591) the input was silent, both long feedback lines (`del1`, `del2`) were written with values that compress to 0 (below 1 LSB of 16 bit) and the three low pass states were below 1 LSB. That is 128 blocks, 0.37 s after the tail has gone. **Threshold: 1 LSB of 16 bit (-90.3 dBFS).** The skipped block keeps the state: the write pointers and the LFO are advanced as `Process()` would advance them (`FxEngine::Skip`), the line buffers are not touched and the low pass states are set to 0. A reverb `Reset()` is quiet at once and a block with sound clears the count.
+
+Where the reverb is not bit identical to the version without the skip (this is the whole list): at the moment the skip starts it drops what it would still have output below 1 LSB (the low pass states and what is left in the dap lines, at most 1 to 2 LSB for a few hundred samples at -90 dBFS), and the activity meter `last_update_delta_` is 0 while skipped (nothing reads it). The buffers stay as they were, so the first note after a long pause meets exactly the state a stock reverb has (zero lines, the same write position and LFO phase, no reset, no fill, no click). In the bench 7 scenarios x 3000 blocks are byte identical, so the residue never flipped a sample. A mutant with 1,024 instead of 16,384 samples differs by up to 4 LSB.
+
+**Limiter** (`effect_limiter.cpp`, bit exact): a limiter that gets NULL still has to run its release, its 5 sample look-ahead delay and the sidechain. It allocates a block of zeros and processes it until one such block leaves its whole state as it found it (gain, peak detector, both delay lines: `relaxed`). From then on silent blocks are skipped, with the same meter value, until a block with sound, a new attack or release time or a sidechain switch. `relaxed` is derived from what the real code did, not from a formula, because the float gain does not always come back to exactly 1.0.
+
+Mutants the bench catches: reverb quiet threshold too small, LFO and pointers not advanced (differences up to 3234 LSB, a different chorus phase), skip without the silent input check, delay quiet length too short, delay lines not zeroed, delay `silentSamplesCount` not advanced, limiter relaxed without the unchanged gain, limiter without the meter and a sidechain switch not clearing `relaxed`.
+
+**What to listen for**: very long reverb tails with the reverb size at the top (the tail must ring out to the end, not cut off or pump), a very quiet reverb tail (a note with a tiny reverb send, then silence), the first note after a long pause (same reverb as before) and a delay with feedback and a long time (the last echoes must still ring out, ping pong too and changing the delay time to a longer time while it is quiet must not bring back old echoes). Switching the reverb off in the project (send 0) with notes still playing is the case where the reverb now stops costing CPU.
+
+Flash: +1,208 B. Emulated cost per block (**estimated**): everything idle 112,163 to 13,411 cycles (-18.9 points), silence after the fx tails with the export taps on -18.4 points, idle after a burst with the filters on -18.9 points, **3 voices playing with zero fx sends once the first block's transient has died away -12.7 points**. With fx in use nothing is skipped and the bookkeeping costs +1.0 k cycles (+0.2 points). What is left in silence (14 k) is the object walk (`AudioStream::update_all` 5.7 k), the output stream clears and the export taps. From the device profile, stopped (wait states included): reverb about 60 k after the SRAM move, delay 28 k, limiters 22 k, tracks and sends mixer 10.7 k and the final mixer 6.3 k go to about 1 k each, which is **about 120 to 125 k, 23 to 24 points when everything is silent**. The reverb 60 k plus delay 28 k (17 points) also go away whenever the sends are zero or between tails.
+
+### Mixers skip what adds nothing
+
+`AudioMixerBase::mix` (`mixer.cpp`, one function for all mixer sizes, the template only holds the gain tables, -24 B of flash against the old copies of the loop). Same result as the old loop for every input, bit identical:
+
+- A NULL input is silence (its gain ramp ends) and an input whose gain is 0 (target and previous) adds nothing: its block is released, never read.
+- Nothing left: no output block (NULL, every consumer treats it as silence).
+- One input left and hard clip (the default saturation type): unity gain forwards the input block itself (no copy, no mix, no clip, because `saturate16` of an `int16` is the identity), another gain runs `applyGain` in place.
+- Several inputs (or another saturation type): the first input with a gain starts the sum (no 512 B clear for a muted first channel, no 256 B copy of a shared block), the rest is `applyGainThenAdd`, then `saturate` as before.
+
+The final mixer has the unity stream gain (`mtAudioEngine.cpp`) and one live input, so it forwards the limiter output untouched. The tracks and sends mixer does the same whenever the delay and reverb are asleep. Evidence: scenarios 0 to 6 byte identical, with scenario 0 also switching the project saturation type of the tracks and tracks + sends mixers (saturate, overdrive, soft clip, back to hard clip) and using a 2.5 gain. Mutants caught: pass-through that ignores a ramp from another gain, a single input path for every saturation type, "gain 0" meaning target only, no copy of a shared block before `applyGain` and no new block for a shared first input.
+
+Emulated cost per block (**estimated**): 3 voices playing with sends -1.4 points, 3 playing with zero sends -2.7 points, 4 voices bursting with fx -0.7 points. From the device profile: `Mix.Final` 6.3 k becomes about 0.7 k on every block, `Mix.TrackSends` 10.7 k about 1 k when delay and reverb sleep, and the tracks and pre-fx mixers lose the clear or copy of the first channel (about 0.6 k each), **about 6 k always (1.1 points), up to 16 k (3 points) with the fx asleep**.
+
+### Synth delay and reverb sends on MK66
+
+`MixerAndFxs<voices>::kFirstSynthSendInput` is the one source of the send input of a synth part: `2 + voices` on MK66 (tracks 0 to 7, external inputs 8 and 9, synth parts 10 to 12) and `2 + 2 * voices` on IMX (value 18, unchanged). Under `FEATURE_SYNTH_OPEN` on MK66 `kSendsInputsCount` is `kFirstSynthSendInput + kSynthParts` = 13 (stock 10, IMX 21, both unchanged). `connectSynthToMixer`, `setSynthDelaySend` and `setSynthReverbSend` use the constant and a `static_assert` keeps every send input inside the mixers. `AudioMixer<13>` is a new instance (`mixer.cpp`, `kMaxMixerInputs` 12 to 13, 4 B of stack).
+
+This fixes a dead feature: the code used inputs 18 to 20 (the Tracker+ layout) of the delay and reverb pre-FX mixers, which have 10 inputs on MK66. `AudioConnection::connect` returned before it linked anything (`dest_index > dst->num_inputs`) and `AudioMixer::gain` ignored the channel, so nothing was written out of bounds and the synth sends were silently dead.
+
+Proof that every `connect()` succeeds: the bench builds the six synth send connections with the firmware's constants and reads `AudioConnection::isConnected` after each one (6 of 6 accepted in all scenarios, and 0 of 6 with the old index as a negative control). The previous and the new graph are byte identical in scenarios 0 to 6 (the stand-in synth sends transmit nothing there), and scenario 7 has the three sends sounding. The cost is the 6 extra empty inputs of the two send mixers, 6 NULL `receiveReadOnly` calls and ramp updates, **+252 emulated cycles per block (0.05 points)**. With a synth part sounding and its send above zero the fx wake up, which is the feature and not the mixer: three synth sends at 0.4 and 0.3 with no track voice cost 22.9 points, the same as a track send of that level.
+
+### Summary
+
+The estimated saving per block, in points of 522,240 cycles (device profile based, estimates and not device readings): reverb buffer in SRAM 4.6 to 6.6 on every block, idle voices send nothing about 13 to 15 stopped and about 1 per idle voice while playing, reverb and delay sleep about 23 to 24 when everything is silent and 12 to 17 whenever the sends are zero, mixers about 1 always and up to 3 with the fx asleep. Stopped, that is 56 % down to roughly 10 to 17 %. Playing the test song (avg 66 %, max 86 %) the first, second and fourth items are what shows because the song has fx sends in use, roughly 8 to 11 points off the peak blocks.
+
+Measured on an original Tracker with pre-release builds: with the first four items, Audio CPU on the Config screen (dev mode) on the same song read min 9, max 76 and avg 50 against stock CE at 43 / 80. With all five, a 4 voice VAP part played at 52 % peak. The reverb and delay tails and the synth sends were checked by ear and worked. 1.0.0 adds the upstream merge and one `-Os` change on top of that build and has not been measured on a device yet. Before a wider release compare its Audio CPU readout with the numbers above.
+
+Not done: profiling instrumentation of the audio graph (a DWT cycle counter build) costs about 7 KB on the stock image and does not fit next to 17 engines. A profiling build with fewer engines (`SYNTH_ENGINES="ACD FAT VAP WTFM"` has about 60 KB free) would measure the same graph.
+
+## Stock build
+
+Plain `make original` is the upstream firmware and the shim never touches it. It differs from clean upstream by 64 B, the out of bounds fixes in the UI: three unconditional `label[8] = { -1 }` fixes (`configEditor.h`, `sampleEditor.h`, `samplePlayback.h`, constructors wrote `label[8]` and `bar[8]` one element past arrays of 8). Everything else is behind `FEATURE_SYNTH_OPEN`, `FW_TRIM` or SYNTH_OPEN make logic.
+
+| Stock build (`BUILD_TAG=7fd6c2c`, `git archive`, `make original`) | image bytes | ends | sha256 |
+|---|---|---|---|
+| clean `origin/main` 7fd6c2c | 902,032 | 0xDC390 | ee2289b510e9ffdaa8aafc49709297b6cfed2fe28cda546cabccbfeed1f2bc3f |
+| tracker-ff (merged) | 902,096 | 0xDC3D0 | e449201f74038da7dffff602abec9310160a4bcaf7e7540417ec3e64049db072 |
+| clean `origin/main` plus our three `label[8]` fixes | 902,096 | 0xDC3D0 | e449201f...db072 (identical to tracker-ff) |
+
+The image embeds the git short hash (`BUILD_ID`), so the sha256 changes with every commit. To regression-check the stock image, rebuild with `BUILD_TAG` set to the baseline commit. Run `make clean` first, because the MK66 platform objects are shared between stock and SYNTH_OPEN builds and a stock build right after a SYNTH_OPEN one gives a different image.
+
+## Build
+
+You need `make`, `python3` and the GNU Arm Embedded Toolchain 10.3-2021.10 (in `./agt/10.3/` or `TOOLCHAIN=/path/to/arm-none-eabi-`).
+
+```
+# the 17 engine release image, build/PolyendTracker_FF_1.0.0.ptf
+make original SYNTH_OPEN=1 TRIM=1 \
+  SYNTH_ENGINES="ACD FAT VAP WTFM PERC CHIP JU6 PHZ FM4 DTYPE CSTYPE ATYPE TTYPE 8TYPE HANDTYPE BTYPE ARCTYPE"
+
+# folder and zip with the .ptf, LICENSE, NOTICE.md and every third party license text, in build/release/
+make package-release SYNTH_OPEN=1 TRIM=1
+```
+
+- `package-release` only packages. The default engine set is the 4 engine one, so build with the explicit 17 engine list first. `synth-open/tools/package_release.sh build/<image>.ptf` does the same packaging for an existing image.
+- A `-D` define change (for example in `version.mk`) does not rebuild the objects that depend on it. After changing a version or tag, delete the objects that depend on `mtStructs.h` and grep the `.ptf` for the old strings.
+- `make clean` at the top level removes everything in `build/`, so keep copies of the images you want.
+- Host checks that need no device: `synth-open/tools/run_smoke.sh "<engines>"` (smoke test), `make synth-engines` (flash budget), `tools/phz_cycles/run_bench.sh` (engine cycles), `tools/idle_cycles/run_bench.sh` and `tools/audio_opt/run_graph.sh` (audio graph). The emulated benches need a Python with `unicorn` and `capstone`.
+
+## Status and licences
+
+- Unofficial, noncommercial community work. Not affiliated with, endorsed by or supported by Polyend.
+- Original Tracker (MK66) only. Version 1.0.0 is **not device-tested**. An earlier pre-release build was run on one original Tracker and the numbers above marked as measured there come from it. Flash at your own risk.
+- This build links neither `libPolySynth.a` nor `libPolyDSP.a`. Nothing here is derived from them.
+- Licences: the repository `LICENSE` (MIT with the Wholesale Commercial Clone Restriction, since upstream's 9cc7aae) covers the tracker-ce code and this shim. It is free to share with `LICENSE` and `NOTICE.md`, and not to sell. `ot/` is OpenTracker under Apache-2.0 (`licenses/LICENSE-OpenTracker-Apache-2.0.txt`), `ot-synths/` is opentracker-synths under MIT (`licenses/LICENSE-OpenTracker-synths-MIT.txt`) and everything is listed in `NOTICE.md`. "Polyend" and "Polyend Tracker" are Polyend's names, used here only to say which device this runs on and because the original's bootloader wants the file name prefix. The release package from `make package-release` has every license text: the `.ptf`, `LICENSE`, `NOTICE.md` and `licenses/`. No factory patches and no `.ptfx` are shipped.

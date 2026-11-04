@@ -101,16 +101,78 @@ inline float polyBlep(float t, float dt)
     return 0.0f;
 }
 
+#ifdef FEATURE_SYNTH_OPEN
+// MK66 (Cortex-M4F, 180 MHz): the voice calls powf, sinf, fmodf, roundf and expf per sample (about 6 libm calls, 135 k of
+// its 205 k cycles per 128 frame block: 39 % of the block per voice, synth-open/tools/phz_cycles). These are the same
+// functions without the libm call: exp2 and sin as polynomials (relative error 5e-9 and 7e-9, exact for exp2 of an
+// integer, far below the 6 bit quantisation of the FM carrier and a hundredth of a cent of pitch), round and fmod bit exact for the ranges used here.
+// Other platforms (Cortex-M7 with a double FPU) keep the std:: calls.
+inline float fastExp2(float x)
+{
+    x = std::clamp(x, -100.0f, 100.0f);
+    float t = x + 0.5f;
+    int i = static_cast<int>(t);
+    i -= (t < static_cast<float>(i)) ? 1 : 0; // floor(x + 0.5): f below is in [-0.5, 0.5]
+    const float f = x - static_cast<float>(i);
+    const float poly =
+      1.0f + f * (0.6931471880f +
+                  f * (0.2402265092f + f * (0.0555035710f + f * (0.0096180567f + f * (0.0013390867f + f * 0.0001546145f)))));
+    union
+    {
+        uint32_t bits;
+        float scale;
+    } pow2{ static_cast<uint32_t>(i + 127) << 23 }; // 2^i
+    return poly * pow2.scale;
+}
+
+// sin(2 pi t) for any t (t in turns)
+inline float fastSineTurns(float t)
+{
+    float r = t - static_cast<float>(static_cast<int>(t)); // (-1, 1)
+    r -= (r > 0.5f) ? 1.0f : 0.0f;
+    r += (r < -0.5f) ? 1.0f : 0.0f;                       // [-0.5, 0.5]
+    r = (r > 0.25f) ? 0.5f - r : ((r < -0.25f) ? -0.5f - r : r); // [-0.25, 0.25]
+    const float r2 = r * r;
+    return r * (6.2831852803f +
+                r2 * (-41.3416806681f + r2 * (81.6024807455f + r2 * (-76.5812845591f + r2 * 39.7607220735f))));
+}
+
+// round half away from zero, like std::round, for |x| < 2^31
+inline float fastRound(float x)
+{
+    const float t = static_cast<float>(static_cast<int>(x));
+    const float d = x - t; // exact
+    return t + ((d >= 0.5f) ? 1.0f : 0.0f) - ((d <= -0.5f) ? 1.0f : 0.0f);
+}
+
+// fmod(x, 1) for x in [0, 2)
+inline float fmodOne(float x) { return (x >= 1.0f) ? x - 1.0f : x; }
+inline float exp2Of(float x) { return fastExp2(x); }
+inline float expOf(float x) { return fastExp2(x * 1.44269504f); }
+inline float roundOf(float x) { return fastRound(x); }
+// 2 sin(pi fc / sr) of the SVF: fc / (2 sr) in turns
+inline float svfCoef(float hz, float invSr) { return 2.0f * fastSineTurns(0.5f * hz * invSr); }
+inline float noteHz(float note) { return sdk::kNoteA4Freq * fastExp2((note - static_cast<float>(kNoteA4)) * (1.0f / static_cast<float>(kOneOctaveNotes))); }
+#else
+inline float fastSineTurns(float t) { return std::sin(t * 2.0f * std::numbers::pi_v<float>); }
+inline float fmodOne(float x) { return std::fmod(x, 1.0f); }
+inline float exp2Of(float x) { return std::pow(2.0f, x); }
+inline float expOf(float x) { return std::exp(x); }
+inline float roundOf(float x) { return std::round(x); }
+inline float svfCoef(float hz, float invSr) { return 2.0f * std::sin(std::numbers::pi_v<float> * hz * invSr); }
+inline float noteHz(float note) { return sdk::noteToFreq(0, note); }
+#endif
+
 inline float fastSine(float phase01)
 {
-    return std::sin(phase01 * 2.0f * std::numbers::pi_v<float>);
+    return fastSineTurns(phase01);
 }
 
 inline float nesSteppedTriangle(float phase01)
 {
     const float tri = (phase01 < 0.5f) ? (phase01 * 4.0f - 1.0f) : (3.0f - phase01 * 4.0f);
     // 4-bit quantized 16-step triangle like the NES 2A03
-    return std::round(tri * 7.5f) / 7.5f;
+    return roundOf(tri * 7.5f) / 7.5f;
 }
 
 inline uint16_t stepLfsr(uint16_t lfsr, bool metallicShortMode)
@@ -126,6 +188,50 @@ class ChiptuneSynthVoice : public sdk::CustomSynthVoice<ChiptuneSynthVoice, Chip
     ChiptuneSynthVoice() = default;
 
     bool isActive() final { return envStage != EnvStage::kIdle; }
+
+#ifdef FEATURE_SYNTH_OPEN
+    // Open shim hooks (see ChiptuneSynthVoice.h): same effect as the param handlers in createMetadata
+    void openSetParam(int paramId, float val)
+    {
+        switch (static_cast<ChipParamId>(paramId))
+        {
+            case ChipParamId::kModel:
+                model = static_cast<ChipModel>(
+                  std::clamp<int>(static_cast<int>(std::lround(val)), 0, kModelNames.size() - 1));
+                break;
+            case ChipParamId::kTune: tuneSemitones = std::round(val); break;
+            case ChipParamId::kFine: fineCents = val; break;
+            case ChipParamId::kShape: shape = val; break;
+            case ChipParamId::kPwmRate: pwmRateHz = val; break;
+            case ChipParamId::kPwmDepth: pwmDepth = val; break;
+            case ChipParamId::kSubMix: subMix = val; break;
+            case ChipParamId::kArpChord:
+                arpChordIdx =
+                  std::clamp<int>(static_cast<int>(std::lround(val)), 0, kArpNames.size() - 1);
+                break;
+            case ChipParamId::kArpSpeed: arpSpeedHz = val; break;
+            case ChipParamId::kPitchSweep: pitchSweepSemitones = val; break;
+            case ChipParamId::kSweepTime: sweepTimeSec = val; break;
+            case ChipParamId::kVibRate: vibRateHz = val; break;
+            case ChipParamId::kVibDepth: vibDepth = val; break;
+            case ChipParamId::kAmpAttack: ampAttackSec = val; break;
+            case ChipParamId::kAmpDecay: ampDecaySec = val; break;
+            case ChipParamId::kAmpSustain: ampSustainLevel = val; break;
+            case ChipParamId::kAmpRelease: ampReleaseSec = val; break;
+            case ChipParamId::kFilterCutoff: filterCutoffHz = val; break;
+            case ChipParamId::kFilterResonance: filterResonance = val; break;
+            case ChipParamId::kFilterEnvAmount: filterEnvAmount = val; break;
+            case ChipParamId::kBitcrush: bitcrushBits = val; break;
+            case ChipParamId::kDecimate: decimateRate = val; break;
+            case ChipParamId::kPlayMode:
+                playMode = static_cast<PlayMode>(std::clamp<int>(std::lround(val), 0, 2));
+                break;
+            case ChipParamId::kGlideTime: glideTimeSec = val; break;
+            case ChipParamId::kVolume: break; // applied by the shim
+        }
+    }
+    void openSetBend(float semitones) { pitchBendSemitones = semitones; }
+#endif
 
     void onNoteOn(const InstrumentVoiceContext& /*ctx*/,
                   note_t note,
@@ -198,12 +304,24 @@ class ChiptuneSynthVoice : public sdk::CustomSynthVoice<ChiptuneSynthVoice, Chip
 
         // Bitcrush quantization levels
         const bool crushActive = (bitcrushBits < 15.5f);
-        const float crushScale = crushActive ? std::pow(2.0f, bitcrushBits - 1.0f) : 32768.0f;
+        const float crushScale = crushActive ? exp2Of(bitcrushBits - 1.0f) : 32768.0f;
         const float invCrushScale = 1.0f / crushScale;
         const int decimateFactor = std::clamp(static_cast<int>(std::lround(decimateRate)), 1, 32);
 
         // Chamberlin SVF resonance / damping
         const float qDamper = std::clamp(1.0f - 0.85f * filterResonance, 0.12f, 1.0f);
+
+        // exp2 and sin of a sample only change when their inputs do (a held note: constant pitch, envelope, cutoff).
+        // Same value for the same input, so the output is bit identical, only the repeated work is skipped
+        float freqNote = 0.0f;
+        float freqHz = 0.0f;
+        bool freqValid = false;
+        float cutArg = 0.0f;
+        float cutHz = 0.0f;
+        bool cutValid = false;
+        float coefHz = 0.0f;
+        float coef = 0.0f;
+        bool coefValid = false;
 
         for (size_t i = 0; i < out.size(); ++i)
         {
@@ -281,7 +399,7 @@ class ChiptuneSynthVoice : public sdk::CustomSynthVoice<ChiptuneSynthVoice, Chip
             {
                 vibPhase -= 1.0f;
             }
-            const float vibSemitones = fastSine(vibPhase) * (vibDepth * 1.5f);
+            const float vibSemitones = (vibDepth != 0.0f) ? fastSine(vibPhase) * (vibDepth * 1.5f) : 0.0f;
 
             // 5. Pitch sweep envelope
             const float sweepProgress =
@@ -298,7 +416,13 @@ class ChiptuneSynthVoice : public sdk::CustomSynthVoice<ChiptuneSynthVoice, Chip
             const float totalNote = currentGlideNote + tuneSemitones + (fineCents * 0.01f) +
                                     pitchBendSemitones + static_cast<float>(arpSemi) +
                                     vibSemitones + activeSweepSemi;
-            const float freq = std::clamp(sdk::noteToFreq(0, totalNote), 16.0f, 18000.0f);
+            if (!freqValid || totalNote != freqNote)
+            {
+                freqNote = totalNote;
+                freqHz = std::clamp(noteHz(totalNote), 16.0f, 18000.0f);
+                freqValid = true;
+            }
+            const float freq = freqHz;
             const float dt = freq * invSr;
 
             // Duty cycle with PWM modulation
@@ -324,7 +448,7 @@ class ChiptuneSynthVoice : public sdk::CustomSynthVoice<ChiptuneSynthVoice, Chip
                 {
                     float pulse = (phase < duty) ? 1.0f : -1.0f;
                     pulse += polyBlep(phase, dt);
-                    pulse -= polyBlep(std::fmod(phase - duty + 1.0f, 1.0f), dt);
+                    pulse -= polyBlep(fmodOne(phase - duty + 1.0f), dt);
                     sig = pulse * 0.75f;
                     break;
                 }
@@ -373,7 +497,7 @@ class ChiptuneSynthVoice : public sdk::CustomSynthVoice<ChiptuneSynthVoice, Chip
                     const float modSig = fastSine(osc2Phase + 0.15f * pwmLfo);
                     // Quantize FM carrier to 6-bit OPL DAC character
                     const float rawCarrier = fastSine(phase + modIndex * modSig * 0.5f);
-                    sig = std::round(rawCarrier * 31.0f) / 31.0f * 0.85f;
+                    sig = roundOf(rawCarrier * 31.0f) / 31.0f * 0.85f;
                     break;
                 }
 
@@ -395,13 +519,13 @@ class ChiptuneSynthVoice : public sdk::CustomSynthVoice<ChiptuneSynthVoice, Chip
                     }
                     float p1 = (phase < duty) ? 1.0f : -1.0f;
                     p1 += polyBlep(phase, dt) -
-                          polyBlep(std::fmod(phase - duty + 1.0f, 1.0f), dt);
+                          polyBlep(fmodOne(phase - duty + 1.0f), dt);
                     float p2 = (osc2Phase < duty) ? 1.0f : -1.0f;
                     p2 += polyBlep(osc2Phase, dt2) -
-                          polyBlep(std::fmod(osc2Phase - duty + 1.0f, 1.0f), dt2);
+                          polyBlep(fmodOne(osc2Phase - duty + 1.0f), dt2);
                     float p3 = (osc3Phase < duty) ? 1.0f : -1.0f;
                     p3 += polyBlep(osc3Phase, dt3) -
-                          polyBlep(std::fmod(osc3Phase - duty + 1.0f, 1.0f), dt3);
+                          polyBlep(fmodOne(osc3Phase - duty + 1.0f), dt3);
                     sig = (p1 + 0.8f * p2 + 0.8f * p3) * 0.34f;
                     break;
                 }
@@ -410,7 +534,7 @@ class ChiptuneSynthVoice : public sdk::CustomSynthVoice<ChiptuneSynthVoice, Chip
                 {
                     // Morphs from Kick (0..0.33) -> Snare (0.33..0.67) -> Metallic Hat (0.67..1.0)
                     const float drumDecay =
-                      std::exp(-static_cast<float>(noteAgeSamples) / (0.08f * sr));
+                      expOf(-static_cast<float>(noteAgeSamples) / (0.08f * sr));
                     const float drumFreq =
                       freq * (1.0f + 3.5f * (1.0f - shape * 0.7f) * drumDecay * drumDecay);
                     osc2Phase += drumFreq * invSr;
@@ -448,7 +572,7 @@ class ChiptuneSynthVoice : public sdk::CustomSynthVoice<ChiptuneSynthVoice, Chip
                 decimateCounter = 0;
                 if (crushActive)
                 {
-                    heldSample = std::round(sig * crushScale) * invCrushScale;
+                    heldSample = roundOf(sig * crushScale) * invCrushScale;
                 }
                 else
                 {
@@ -458,15 +582,23 @@ class ChiptuneSynthVoice : public sdk::CustomSynthVoice<ChiptuneSynthVoice, Chip
             float postCrush = heldSample;
 
             // 9. State-Variable Lowpass Filter with envelope modulation
-            const float envCutoff =
-              std::clamp(filterCutoffHz *
-                           std::pow(2.0f, filterEnvAmount * envLevel * 4.0f),
-                         40.0f,
-                         18000.0f);
+            const float envArg = filterEnvAmount * envLevel * 4.0f;
+            if (!cutValid || envArg != cutArg)
+            {
+                cutArg = envArg;
+                cutHz = std::clamp(filterCutoffHz * exp2Of(envArg), 40.0f, 18000.0f);
+                cutValid = true;
+            }
+            const float envCutoff = cutHz;
             if (envCutoff < 17500.0f || filterResonance > 0.02f)
             {
-                const float f =
-                  std::min(0.85f, 2.0f * std::sin(std::numbers::pi_v<float> * envCutoff * invSr));
+                if (!coefValid || envCutoff != coefHz)
+                {
+                    coefHz = envCutoff;
+                    coef = std::min(0.85f, svfCoef(envCutoff, invSr));
+                    coefValid = true;
+                }
+                const float f = coef;
                 svfLow += f * svfBand;
                 const float high = postCrush - svfLow - qDamper * svfBand;
                 svfBand += f * high;
@@ -1021,6 +1153,25 @@ class ChiptuneSynthVoice : public sdk::CustomSynthVoice<ChiptuneSynthVoice, Chip
 };
 
 } // namespace
+
+#ifdef FEATURE_SYNTH_OPEN
+namespace open
+{
+std::unique_ptr<InstrumentVoice> chipVoiceCreate() { return std::make_unique<ChiptuneSynthVoice>(); }
+void chipVoiceReset(InstrumentVoice& voice)
+{
+    static_cast<ChiptuneSynthVoice&>(voice) = ChiptuneSynthVoice();
+}
+void chipVoiceSetParam(InstrumentVoice& voice, int paramId, float value)
+{
+    static_cast<ChiptuneSynthVoice&>(voice).openSetParam(paramId, value);
+}
+void chipVoiceSetBend(InstrumentVoice& voice, float semitones)
+{
+    static_cast<ChiptuneSynthVoice&>(voice).openSetBend(semitones);
+}
+} // namespace open
+#endif
 
 std::unique_ptr<InstrumentType> createChiptuneSynth()
 {

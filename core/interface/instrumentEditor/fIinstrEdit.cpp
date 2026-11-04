@@ -2764,8 +2764,8 @@ void cInstrumentEditor::lightUpPadBoard()
         {
             int synthIdx = instrumentIdxToSynthIdx(mtProject.values.lastUsedInstrument);
 
-            if (Synth::kSynthTypes.at(mtProject.values.synthPart[synthIdx].synthType) ==
-                polysynth::InstrumentTypeId::kDrumSynth)
+            if (Synth::storedTypeIs(mtProject.values.synthPart[synthIdx].synthType,
+                                    polysynth::InstrumentTypeId::kDrumSynth))
             {
                 for (int padIdx = 0; padIdx < 48; padIdx++)
                 {
@@ -2811,8 +2811,8 @@ void cInstrumentEditor::lightUpPadBoard()
                 {
                     int synthIdx = instrumentIdxToSynthIdx(mtProject.values.lastUsedInstrument);
 
-                    if (Synth::kSynthTypes.at(mtProject.values.synthPart[synthIdx].synthType) ==
-                        polysynth::InstrumentTypeId::kDrumSynth)
+                    if (Synth::storedTypeIs(mtProject.values.synthPart[synthIdx].synthType,
+                                            polysynth::InstrumentTypeId::kDrumSynth))
                     {
 
                         int playedPad = clamp<int>(IE->convertPadForEditPatchScreen(pad), 0, 47);

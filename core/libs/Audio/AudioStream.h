@@ -49,6 +49,13 @@
 // Some parts of the audio library may have hard-coded dependency on 128 samples.
 // Please report these on the forum with reproducible test cases.
 #define AUDIO_BLOCK_SAMPLES     128
+
+// SYNTH_OPEN images: a NULL input block means a block of silence, not a missing one. Idle voices transmit nothing (effect_envelope.cpp),
+// and every consumer behaves exactly as if it had received a block of zeros: the same output and the same state (gain ramps, filter,
+// limiter, meters, export taps), see synth-open/README.md, Audio CPU. Stock builds keep the old code paths.
+#ifdef FEATURE_SYNTH_OPEN
+#define AUDIO_NULL_IS_SILENCE 1
+#endif
 #define AUDIO_SAMPLE_RATE_EXACT 44117.64706f // 48 MHz / 1088, or 96 MHz * 2 / 17 / 256
 #define AUDIO_SAMPLE_RATE       AUDIO_SAMPLE_RATE_EXACT
 

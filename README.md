@@ -1,164 +1,57 @@
-# Polyend Tracker Community Edition (CE)
+# tracker-ff
 
-Welcome to the **Polyend Tracker Community Edition** repository!
+Unofficial community firmware for the **original Polyend Tracker** (the MK66 model, Cortex-M4F at 180 MHz). It is a fork of Polyend's open source firmware [polyend/tracker-ce](https://github.com/polyend/tracker-ce) (Tracker Community Edition) and adds synth engines to the original Tracker. Version 1.0.0. The name FF is the max value 0xFF.
 
-Built directly from the original Polyend firmware source code, Tracker CE opens up the Polyend Tracker platform to musicians, sound designers, and developers around the world. Whether you are here to flash the latest Community Edition firmware, want to build your own idea on the Tracker, design custom themes and fonts, write Sample Editor plugins, or build new synthesizer engines, we are excited to have you here.
+tracker-ff is not affiliated with, endorsed by or supported by Polyend. It is free and non-commercial.
 
-This unified codebase powers all three hardware instruments in the Tracker family:
-* **Original Polyend Tracker** (`NXP Kinetis MK66FX1M0`, Cortex-M4F @ 180 MHz)
-* **Polyend Tracker+ & Tracker Mini** (`NXP i.MX RT1051/RT1064`, Cortex-M7 @ 600 MHz)
+## What it adds
 
-### What's New:
-See [`CHANGELOG.md`](CHANGELOG.md) for the full list of new features and improvements.
+Upstream CE has synth engines only on the Tracker+ and the Mini, because Polyend's engine library is closed and built for their Cortex-M7 chip. tracker-ff replaces that layer on the original with an open one in [`synth-open/`](synth-open/README.md), so the original gets synth slots too. It never links Polyend's closed `libPolySynth.a` or `libPolyDSP.a`.
 
+- **17 synth engines** in one image: ACD, FAT, VAP, WTFM, PERC, CHIP, JU6, PHZ, FM4, D-Type, CS-Type, A-Type, T-Type, 8-Type, Hand-Type, B-Type and Arc-Type. Most come from [OpenTracker](https://github.com/sandlbn/polyend-tracker-re) and [opentracker-synths](https://github.com/opentracker-fw/opentracker-synths) through a shim that hosts their engine interface. CHIP is Polyend's own open Chiptune voice. PHZ is a phase distortion engine written for this project from the public manual.
+- **Polyphony and a governor.** Up to 4 voices per synth instrument, a shared voice pool (default 4, at most 8) and OpenTracker's governor, which drops voices when the audio block load gets too high.
+- **`.patch` files and pitch bend.** Patches load and save from `Patches/<ENGINE>/` on the SD card, including Polyend's factory patches. Pitch bend works from MIDI and from the Micro-tune FX.
+- **Lower idle audio CPU.** Synth parts with nothing sounding are skipped in the audio graph, idle voices send no data, the reverb and short delay sleep when silent, mixers skip empty inputs and one reverb buffer lives in internal SRAM. The details and the bench that checks the output stays bit identical are in `synth-open/README.md`.
+- **TRIM flash budget.** `TRIM=1` links with newlib-nano and builds the UI, the platform code and some cold code at `-Os`, so 17 engines fit in the original's flash. The release image ends at 0xFB7C0 (1,030,080 bytes of 1,044,480 allowed). The last 4 KB sector stays free.
+- **Fixes.** Three out of bounds writes to `label[8]` arrays in the UI are fixed in all builds.
 
-## Notice: Official Support, Warranty & Hardware Disclaimer
+Not available: Polyend's DIRT and Shaping engines (they exist only in the closed library). A project that uses an engine missing from the build gets that part reset to defaults on load.
 
-> **A Quick Note Before Flashing or Modifying Firmware**
->
-> Thanks to the Tracker's isolated bootloader and hardware emergency recovery button (see [Flashing on Hardware & Emergency Recovery](#4-flashing-on-hardware--emergency-recovery)), experimenting with Community Edition builds is very safe. Even if a custom build fails to boot, you can easily re-flash a stable `.ptf` image from your microSD card. That said, we still need to include the standard legal disclaimer just in case:
->
-> * **Provided "AS IS" Without Support Obligation**: While the foundation of this repository was originally developed and released by **Polyend**, the **Polyend Tracker Community Edition (CE)** firmware, source code, and any community-developed modifications or plugins are provided **"AS IS"**, without warranty of any kind, express or implied. **Polyend has no obligation to provide official technical support, maintenance, bug fixes, or customer service** for Community Edition firmware or custom builds.
-> * **Use at Your Own Risk**: Flashing, modifying, or running custom firmware is done at your own discretion and risk. Polyend is not liable for any data loss, project corruption, malfunction, or hardware damage (including "bricking" a device or issues caused by code modifications) arising from the use of this software.
-> * **Out-of-Warranty Repairs Available**: In the unlikely event that something ever goes wrong with your hardware while using custom firmware, it is **not covered under standard warranty**. However, **Polyend is always happy to help get your instrument back up and running through its official out-of-warranty repair service** (standard service, parts, and shipping fees apply. See [How to Contact Polyend Customer Support](https://backstage.polyend.com/t/how-to-contact-the-polyend-customer-support/15510)).
+## Hardware
 
----
+The original Polyend Tracker (MK66) only. The Tracker+ and the Mini are not built or tested in this fork. Their code is still in the tree from upstream. For those devices use [upstream](https://github.com/polyend/tracker-ce).
 
-## Repository Structure
+## Status
 
-```text
-.
-├── Makefile                # Unified top-level build & version management
-├── version.mk              # Centralized version & build number configuration
-├── CHANGELOG.md            # Release history & feature highlights
-├── CONTRIBUTING.md         # Contribution rules & hardware testing workflow
-├── LICENSE                 # MIT License (+ No Wholesale Commercial Clones & Precompiled Synth Terms)
-├── NOTICE.md               # Third-party open-source attributions
-├── core/                   # Shared Tracker application, audio engine, UI & open synth engines
-├── platforms/
-│   ├── mk66/               # Original Tracker (Kinetis MK66) HAL, drivers & linker scripts
-│   └── imx/                # Tracker+ & Tracker Mini (i.MX RT1051) HAL, drivers & linker scripts
-├── synth/
-│   ├── include/PolySynth/  # PolySynth public headers & Open Synth SDK (synth/include/PolySynth/sdk/)
-│   └── lib/                # Precompiled libPolySynth.a & libPolyDSP.a + LICENSE-PROPRIETARY.txt
-├── util/                   # Shared C++ utility headers & third-party header libraries (ETL, magic_enum)
-├── editor-fx-sdk/          # .ptfx Sample Editor plugin SDK, builder & effects/ sources
-└── docs/                   # User guides, SDK tutorials & architecture documentation
-```
+An earlier pre-release build was run on one original Tracker. Audio CPU, reverb and delay tails and the synth sends were checked there. Version 1.0.0 adds the merge of upstream's relicense and file hardening and a `-Os` change to the sequencer, and has not been run on a device yet. See `synth-open/README.md` for the numbers and what was and was not measured.
 
----
+## Flash
 
-## Guiding Principles of the Community Edition Firmware
+1. Copy `PolyendTracker_FF_1.0.0.ptf` to the `/Firmware/` folder on the microSD card.
+2. On the Tracker open **Config > Firmware > Firmware update**, pick the file and confirm.
 
-This repository prioritizes workflow continuity: our aim is to respect existing muscle memory, introduce features, optimizations and improvements that fit the original vision of the device, while fixing bugs along the way.
+Do not rename the file. The original's bootloader lists only names that start with `PolyendTrac` and are at most 31 characters long. Back up your `Projects/` folder first, because upstream CE saves patterns in a newer format that older firmware cannot read. If a build does not boot, the emergency recovery steps in [upstream's README](docs/upstream-README.md#4-flashing-on-hardware--emergency-recovery) apply.
 
-If you have ideas for major workflow adjustments or structural changes, please open a [GitHub Discussion](https://github.com/polyend/tracker-ce/discussions) or a topic on the [Polyend Backstage Forum](https://backstage.polyend.com/) first, so we can align on direction together with the community.
+## Build
 
-For radical experiments or reimagined interfaces, we actively encourage community forks!
-
----
-
-## Contributing
-
-We welcome community contributions! ❤️
-
-From bug fixes and workflow improvements to new open-source synth engines and `.ptfx` Sample Editor plugins. Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) for our project philosophy, pull request rules, hardware testing workflow, and technical checklist before opening a Pull Request.
-
----
-
-## Building Firmware
-
-### 1. Prerequisites
-* **[GNU Arm Embedded Toolchain `10.3-2021.10`](https://developer.arm.com/downloads/-/gnu-rm)**:
-  * Direct official downloads from Arm:
-    * **Linux (`x86_64`)**: [`gcc-arm-none-eabi-10.3-2021.10-x86_64-linux.tar.bz2`](https://developer.arm.com/-/media/Files/downloads/gnu-rm/10.3-2021.10/gcc-arm-none-eabi-10.3-2021.10-x86_64-linux.tar.bz2)
-    * **Linux (`aarch64` / ARM64)**: [`gcc-arm-none-eabi-10.3-2021.10-aarch64-linux.tar.bz2`](https://developer.arm.com/-/media/Files/downloads/gnu-rm/10.3-2021.10/gcc-arm-none-eabi-10.3-2021.10-aarch64-linux.tar.bz2)
-    * **macOS (`x86_64` / Apple Silicon via Rosetta)**: [`gcc-arm-none-eabi-10.3-2021.10-mac.tar.bz2`](https://developer.arm.com/-/media/Files/downloads/gnu-rm/10.3-2021.10/gcc-arm-none-eabi-10.3-2021.10-mac.tar.bz2)
-    * **Windows (ZIP)**: [`gcc-arm-none-eabi-10.3-2021.10-win32.zip`](https://developer.arm.com/-/media/Files/downloads/gnu-rm/10.3-2021.10/gcc-arm-none-eabi-10.3-2021.10-win32.zip)
-  * Ensure `arm-none-eabi-gcc` is on your `PATH`, extract the toolchain into `./agt/10.3/`, or pass `TOOLCHAIN=/path/to/arm-none-eabi-` to `make`.
-* `make` (for building firmware) and `python3` (used by `make ptfx` to package `.ptfx` Sample Editor plugins and by the `make bump-*` version helpers; standard library only).
-
-### 2. Build Commands
-From the repository root:
+You need `make`, `python3` and the GNU Arm Embedded Toolchain 10.3-2021.10. Put it in `./agt/10.3/` or pass `TOOLCHAIN=/path/to/arm-none-eabi-`. Build only the original, `make all` also builds the Tracker+ and the Mini.
 
 ```bash
-# Build all three devices (Original Tracker, Tracker+, Tracker Mini)
-make all
+# the 17 engine release image, build/PolyendTracker_FF_1.0.0.ptf
+make original SYNTH_OPEN=1 TRIM=1 \
+  SYNTH_ENGINES="ACD FAT VAP WTFM PERC CHIP JU6 PHZ FM4 DTYPE CSTYPE ATYPE TTYPE 8TYPE HANDTYPE BTYPE ARCTYPE"
 
-# Or build a single target:
-make original   # -> build/PolyendTracker_CE_1.0.0.ptf
-make plus       # -> build/TrackerPlus_CE_1.0.0.ptf
-make mini       # -> build/TrackerMini_CE_1.0.0.ptf
-
-# Build reference .ptfx Sample Editor effects into editor-fx-sdk/build/Effects/:
-make ptfx
-
-# Clean all build directories:
-make clean
+# folder and zip with the .ptf, LICENSE, NOTICE.md and every third party license text, in build/release/
+make package-release SYNTH_OPEN=1 TRIM=1
 ```
 
-### 3. Version Management (`version.mk`)
-All firmware version numbers are defined in [`version.mk`](version.mk). The **Build** identifier displayed on the hardware under **Config > Firmware > Build** is automatically populated from the short Git commit hash (`git rev-parse --short=7 HEAD`):
+`SYNTH_ENGINES` picks any subset of the engines. Without it the build has only ACD FAT VAP WTFM. `make synth-engines` prints the flash cost of each engine. The build stops if the image would pass the flash cap, and `build/BUILD.txt` lists the engines and sizes. Plain `make original` builds the stock upstream firmware without the synth layer. Add `BUILD_TAG=<hash>` to set the build id shown on the Config screen. `make clean` at the top level removes everything in `build/`, so keep copies of the images you want.
 
-```bash
-# Show current version, Git build hash & output filenames
-make version
+Upstream's build notes (toolchain downloads, version helpers, `.ptfx` plugins) are in [`docs/upstream-README.md`](docs/upstream-README.md). The technical description of the synth layer and the build is [`synth-open/README.md`](synth-open/README.md).
 
-# Increment patch version (e.g. 1.0.0 -> 1.0.1)
-make bump-patch TARGET=all        # or TARGET=original | TARGET=plus | TARGET=mini
+## License and credits
 
-# Increment minor version (e.g. 1.0.x -> 1.1.0)
-make bump-minor TARGET=all        # or TARGET=original | TARGET=plus | TARGET=mini
-```
-
-### 4. Flashing on Hardware & Emergency Recovery
-
-1. Copy the generated `.ptf` file from `build/` (`PolyendTracker_*.ptf`, `TrackerPlus_*.ptf`, or `TrackerMini_*.ptf`) to the `/Firmware/` folder on your Tracker's microSD card.
-   * *Note*: Keep `.ptf` filenames at **31 characters or fewer** so the Original Tracker's 32-byte `/Firmware/_fwinfo` bootloader buffer remains null-terminated.
-2. On the device, open **Config > Firmware > Firmware update**, select the `.ptf` file, and confirm.
-
-> **Bootloader Resilience & Emergency Firmware Recovery**:
-> * The Polyend Tracker bootloader is isolated from the application firmware:
->   * On the **Original Tracker (`MK66`)**, the bootloader runs on a separate dedicated microcontroller (`kBootloaderTrig`).
->   * On **Tracker+ and Tracker Mini (`IMX`)**, the bootloader resides in a protected region at the bottom of QSPI Flash (`0x60000000`–`0x6002FFFF`), while `.ptf` application builds are linked starting at `0x60030000` (do not modify the flash `ORIGIN` address in the linker scripts).
-> * **Emergency Recovery**: If a custom firmware build ever hangs or fails to boot into the UI, you can always recover your device:
->   1. Place a known-good, stable `.ptf` firmware file for your device inside the `/Firmware/` folder on your microSD card (ideally as the only `.ptf` file in `/Firmware/`).
->   2. Insert the microSD card into your Tracker and power it on.
->   3. Use a paperclip or SIM-eject pin to press the **recessed hardware Reset / Emergency Bootloader pinhole button** (located on the bottom of the Original Tracker / Tracker+, or next to the USB-C port on Tracker Mini). The hardware bootloader will automatically pick up the `.ptf` file from `/Firmware/` and flash it.
-
----
-
-## Documentation & Developer Guides
-
-Full user and developer documentation is available in [`docs/`](docs/Home.md) and on the repository **Wiki**:
-
-* **User Guides**:
-  * [Custom Themes & Fonts](docs/custom_themes_and_fonts.md) + [Live Web Editor](https://polyend.github.io/tracker-theme-editor/) ([`polyend/tracker-theme-editor`](https://github.com/polyend/tracker-theme-editor))
-  * [Wavetable Envelopes, LFOs & Step FX](docs/wavetable_envelopes.md)
-  * [SD Card Image Viewer](docs/image_viewer.md)
-* **Developer & Architecture Guides**:
-  * [Firmware Architecture, Hardware Limits & Developer Gotchas](docs/developer_guide.md)
-  * [Custom Synth Engine SDK](docs/custom_synth_sdk.md)
-  * [Modular Sample Editor Effects & `.ptfx` Developer SDK](docs/modular_effects_system.md)
-
----
-
-## Polyend Tracker Open-Source Ecosystem
-
-This repository is part of a growing open-source ecosystem around the Polyend Tracker family:
-
-* **[`polyend/tracker-theme-editor`](https://github.com/polyend/tracker-theme-editor)** ([Live Web App](https://polyend.github.io/tracker-theme-editor/)): Browser-based visual **Theme & Font Editor** with a hardware screen simulator.
-* **[`polyend/tracker-lib`](https://github.com/polyend/tracker-lib)**: Open-source library and tools for reading, writing, and inspecting Polyend Tracker project (`.mt`), pattern (`.mtp`), and instrument (`.pti`) files.
-* **[Polyend Backstage Forum](https://backstage.polyend.com/)**: Community forum for sharing custom themes, fonts, `.ptfx` plugins, synth engines, and discussing workflows.
-* **[The Tracker Overflow (Discord)](https://discord.com/invite/uEPTnwckJV)**: Unofficial Polyend Tracker Discord where users and developers can join, chat, and find like-minded people.
-
----
-
-## License
-
-* **Source Code, SDKs, Open Synth Engines (`core/synth/engines/`), `.ptfx` Sample Editor SDK (`editor-fx-sdk/`), Drivers & Utilities**: Licensed under the **MIT License with a Wholesale Commercial Clone Restriction** (see [`LICENSE`](LICENSE)).
-  * **Musicians & Creators**: Using the firmware for commercial music production, albums, paid live performances/gigs, sample packs, and monetized streaming/YouTube content is **expressly permitted**.
-  * **Developers & Plugin Authors**: Reusing individual source files, drivers, DSP algorithms, UI widgets, or open-source C++ synth engines (`CHIP`, etc.) in your own open-source or commercial projects—and selling `.ptfx` Sample Editor plugins—is **expressly permitted** under the MIT License.
-  * **No Wholesale Commercial Clones**: You may **not** sell compiled `.ptf` firmware builds, manufacture/sell commercial clone hardware running the Tracker firmware, or sell a direct port/wholesale clone of the complete Tracker application as a paid software product.
-* **Precompiled Synth & DSP Libraries (`synth/lib/libPolySynth.a`, `synth/lib/libPolyDSP.a`)**: Provided under the [Polyend Precompiled Synthesizer & DSP Library License](synth/lib/LICENSE-PROPRIETARY.txt), permitting free use on authentic Polyend hardware as well as personal/DIY non-commercial projects (commercial embedding of the precompiled `.a` binaries is prohibited).
-* **Third-Party Components**: See [`NOTICE.md`](NOTICE.md).
+- [`LICENSE`](LICENSE): MIT with upstream's Wholesale Commercial Clone Restriction. You can use, share and modify the firmware for free. You may not sell builds or clones of it, and you may not use Polyend's marks in a commercial product. Ship `LICENSE` and `NOTICE.md` with any build you pass on.
+- [`NOTICE.md`](NOTICE.md) and [`licenses/`](licenses/): third party components and their license texts, including OpenTracker (Apache-2.0), opentracker-synths (MIT) and the Mutable Instruments reverb (MIT).
+- tracker-ff is a fork of [polyend/tracker-ce](https://github.com/polyend/tracker-ce) and builds on the work of Polyend, OpenTracker and opentracker-synths. "Polyend" and "Polyend Tracker" are Polyend's names. They appear here only to say which device this runs on and because the original's bootloader needs the file name prefix.
+- The project is free and non-commercial.
