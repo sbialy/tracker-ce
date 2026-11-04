@@ -131,6 +131,9 @@ class audioEngine
 
     bool isSynthFx(uint8_t fx_id);
     void seqSynthFx(uint8_t fx_id, uint8_t fx_val, uint8_t fx_n, uint8_t synthIdx);
+#ifdef FEATURE_SYNTH_OPEN
+    void seqPatchChange(uint8_t slot, uint8_t synthIdx);
+#endif
     void refreshSynthInstrumentParams(SynthPartSettings& synthSettings, int synthIdx);
     float getSynthVoiceRMS(uint8_t channel, int synthIdx);
 #endif
@@ -239,6 +242,9 @@ class audioEngine
 
 #ifdef FEATURE_SYNTH
     SynthVoice synthVoice;
+#ifdef FEATURE_SYNTH_OPEN
+    Synth* patchBankSynth = nullptr;
+#endif
     std::optional<float> synthParams[kSynthParts][SynthParam::kSynthParamsCount]
                                     [SynthValuesSource::kSynthValuesSourceCount] = {};
     std::bitset<SynthParam::kSynthParamsCount>

@@ -177,7 +177,14 @@ bool Synth::savePatch(int part, const char* name)
         parts[part].patchName = name;
     }
 
-    return patchStore->savePatch(parts[part].patchName, *parts[part].patch);
+    const bool saved = patchStore->savePatch(parts[part].patchName, *parts[part].patch);
+#ifdef FEATURE_SYNTH_OPEN
+    if (saved)
+    {
+        reloadPatchBank(part); // a new or renamed file moves the alphabetical slots
+    }
+#endif
+    return saved;
 }
 
 bool Synth::savePatch(int part)
@@ -226,8 +233,30 @@ bool Synth::loadPatchFromWorkspace(int part, std::optional<std::string> override
     }
 
     parts[part].patchDirty = false;
+#ifdef FEATURE_SYNTH_OPEN
+    reloadPatchBank(part);
+#endif
     return fileLoaded;
 }
+
+#ifdef FEATURE_SYNTH_OPEN
+void Synth::reloadPatchBank(int part)
+{
+    static_assert(kSynthParts <= polysynth::open::kPatchBankParts, "one patch bank per synth part");
+    assert(part < kSynthParts);
+
+    if (parts[part].patch && patchStore)
+    {
+        newFileManager.createPatchesFolder();
+        polysynth::open::patchBankPreload(part, *parts[part].patch, *patchStore);
+    }
+}
+
+bool Synth::applyPatchBankSlot(int part, int slot)
+{
+    return part >= 0 && part < kSynthParts && polysynth::open::patchBankApply(part, slot, parts[part].patch.get());
+}
+#endif
 
 void Synth::saveDirtyWorkspacePatches()
 {
@@ -285,6 +314,9 @@ void Synth::setInstrumentType(int partIdx, polysynth::InstrumentTypeId typeId)
         DISABLE_AUDIO_INTERRUPTS();
         part.instrument->assignPatch(part.patch);
         ENABLE_AUDIO_INTERRUPTS();
+#ifdef FEATURE_SYNTH_OPEN
+        reloadPatchBank(partIdx);
+#endif
     }
 }
 

@@ -124,7 +124,11 @@ const uint8_t PATTERN_INDEX_MIN = 1;
 const uint8_t PATTERN_INDEX_MAX = 255;
 
 const uint8_t FX_MAX = 49;
+#ifdef FEATURE_SYNTH_OPEN
+const uint8_t FX_COUNT = 47; // + "Patch" (FX_TYPE_PATCH_CHANGE), SYNTH_OPEN only
+#else
 const uint8_t FX_COUNT = 46;
+#endif
 const uint8_t FX_COUNT_HIDDEN_FXes = 1; // ile fxów na końcu listy jest ukrytych
 
 const uint8_t FX_VALUE_MAX = 127;

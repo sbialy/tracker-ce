@@ -314,6 +314,51 @@ int main() {
     check(ws->savePatch("0", *w0) && mw->files.count("0.patch") == 1, "workspace store writes Workspace/0.patch (no type folder)");
     auto w1 = ws->createPatch(kLead);
     check(ws->loadPatch("0", *w1, true) && *w1->getParamValue(0) == w0v, "project reload: the edited value comes back from Workspace/0.patch");
+    // ---- patch change FX: a bank of the first patches of the engine, applied as a plain copy of the values
+    {
+      auto sB = Synth::createSynth([](size_t){return nullptr;});
+      auto fsB = std::make_unique<MemFS>(); MemFS* mb = fsB.get();
+      sB->addFileSystem(Synth::FileSystemId::kPatches, std::move(fsB));
+      auto pb = sB->createPatchStore(Synth::FileSystemId::kPatches, true);
+      auto sE = Synth::createSynth([](size_t){return nullptr;});   // a library with no patch at all
+      sE->addFileSystem(Synth::FileSystemId::kPatches, std::make_unique<MemFS>());
+      auto pe = sE->createPatchStore(Synth::FileSystemId::kPatches, true);
+      auto sameValues = [](Patch& a, Patch& b) { const size_t n = a.getMetadata().params.size(); bool same = n == b.getMetadata().params.size();
+        for (size_t i = 0; i < n && same; i++) same = *a.getParamValue(int(i)) == *b.getParamValue(int(i)); return same; };
+      bool switches = true, keepsMacros = true, ignoresBad = true, ignoresForeign = true, emptyIgnored = true, changed = true;
+      int part = 0;
+      for (const auto& k : kinds) {
+        auto lo = pb->createPatch(int(k.id)), hi = pb->createPatch(int(k.id)); const auto& m = lo->getMetadata();
+        for (size_t i = 0; i < m.params.size(); i++) { const float a = float(m.params[i].minValue), b = float(m.params[i].maxValue);
+          lo->setParamValue(int(i), a + (b - a) * 0.1f, Patch::ParamChangeSource::kKnob); hi->setParamValue(int(i), a + (b - a) * 0.9f, Patch::ParamChangeSource::kKnob); }
+        pb->savePatch("b_low", *lo); pb->savePatch("b_high", *hi);   // alphabetical: slot 0 = b_high, slot 1 = b_low
+        auto rHi = pb->createPatch(int(k.id)), rLo = pb->createPatch(int(k.id));   // what the patch browser loads
+        pb->loadPatch("b_high", *rHi, true); pb->loadPatch("b_low", *rLo, true);
+        auto part0 = pb->createPatch(int(k.id)); part0->setMacroDisplayName(0, "Keep");
+        const bool differs = !sameValues(*part0, *rHi) && !sameValues(*rHi, *rLo);
+        changed = changed && differs;
+        const int myPart = part++ % open::kPatchBankParts;
+        open::patchBankPreload(myPart, *part0, *pb);
+        switches = switches && open::patchBankApply(myPart, 0, part0.get()) && sameValues(*part0, *rHi);
+        switches = switches && open::patchBankApply(myPart, 1, part0.get()) && sameValues(*part0, *rLo);
+        keepsMacros = keepsMacros && part0->getMetadata().macros[0].displayName == "Keep";
+        for (int bad : {2, 15, 16, 99, -1}) ignoresBad = ignoresBad && !open::patchBankApply(myPart, bad, part0.get()) && sameValues(*part0, *rLo);
+        if (nKinds > 1) {
+          const auto& other = kinds[(&k == &kinds[0]) ? 1 : 0];
+          auto foreign = pb->createPatch(int(other.id));
+          ignoresForeign = ignoresForeign && !open::patchBankApply(myPart, 0, foreign.get()) && !open::patchBankApply(myPart, 1, foreign.get());
+        }
+        auto bare = pe->createPatch(int(k.id)); open::patchBankPreload(myPart, *bare, *pe);   // the part now has no library
+        emptyIgnored = emptyIgnored && !open::patchBankApply(myPart, 0, bare.get());
+        mb->files.erase(std::string(k.name) + "/b_low.patch"); mb->files.erase(std::string(k.name) + "/b_high.patch");
+      }
+      check(changed, "bank test patches differ from each other and from the Init patch (all engines of this build)");
+      check(switches, "patch change FX: slot 0 and slot 1 switch the values to the 2nd and 1st alphabetical patch (all engines)");
+      check(keepsMacros, "patch change FX leaves the macros of the part alone");
+      check(ignoresBad, "patch change FX: empty or out of range slots (2, 15, 16, 99, -1) are ignored, values stay");
+      check(ignoresForeign, "patch change FX: a part of another engine than the bank is ignored");
+      check(emptyIgnored, "patch change FX: a part with no patches in its library ignores every slot");
+    }
 #ifdef OT_ORACLE
     // OpenTracker's own codec as oracle: its Init patches load here and our files decode and re-encode there byte for byte
     bool oraOk = true; int engIds[4] = { ot::kSynthEngineAcd, ot::kSynthEngineFat, ot::kSynthEngineVap, ot::kSynthEngineWtfm };

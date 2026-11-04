@@ -543,6 +543,20 @@ AUDIO_CORE_FLASH void Sequencer::play_microStep(int row)
                 case fx.FX_TYPE_GATE_LENGTH:
                     gateLength = mapClamped<int>(_fx.value, 0, 100, 0, 47);
                     break;
+#if defined(FEATURE_SYNTH) && defined(FEATURE_SYNTH_OPEN)
+                case fx.FX_TYPE_PATCH_CHANGE:
+                    // one-shot, runs in the audio callback before the synth renders: copies a preloaded bank slot into the part
+                    killFxOnSlot(row, fxIndex);
+                    atLeastOneFx = 1;
+                    if (isSynthInstrument(stepToSend.instrument))
+                    {
+                        int synthIdx = instrumentIdxToMidiChannel(stepToSend.instrument) - 1;
+                        assert(!isOutOfRange(synthIdx, 0, kSynthParts - 1));
+
+                        engine.seqPatchChange(_fx.value, synthIdx);
+                    }
+                    break;
+#endif
                 case fx.FX_TYPE_OFF:
                     killFxOnSlot(row, fxIndex);
                     atLeastOneFx = 1;

@@ -5,6 +5,12 @@
 
 #include <cstdint>
 
+namespace polysynth
+{
+class Patch;
+class PatchStore;
+} // namespace polysynth
+
 namespace polysynth::open
 {
 
@@ -25,6 +31,17 @@ void resetOnProjectLoad();
 // transmits nothing (a missing block is silence for the amplifiers, analysers and mixers downstream) instead of
 // rendering, soft clipping and sending blocks of zeros. False for a part that does not exist.
 bool partIdle(int part);
+
+// Patch change FX. Per part, a bank of the first 16 patches of the part's engine (Patches/<ENGINE>/, alphabetical, as the
+// patch browser lists them), held as plain values (no macros, no OpenPatch). Slots of another engine, a missing slot or a file
+// that does not decode are ignored.
+constexpr int kPatchBankSlots = 16;
+constexpr int kPatchBankParts = 3;
+// Main thread (after a patch is loaded, the engine changes or a patch is saved): reads the files and replaces the bank of `part`.
+void patchBankPreload(int part, Patch& patch, PatchStore& store);
+// Audio callback (Sequencer::tick, before the synth renders): copies the values of `slot` into `patch`. False (nothing
+// changed) when the slot is out of range, empty or from another engine. No allocation, no file access, patchDirty untouched.
+bool patchBankApply(int part, int slot, Patch* patch);
 
 // Global synth voice pool shared by all slots: default 4 (OpenTracker 2.2.4), max 8.
 constexpr int kDefaultVoiceBudget = 4;

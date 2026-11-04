@@ -109,6 +109,12 @@ class Synth
     void setVoiceCount(int part, int voiceCount);
     int getMaxVoiceCount(int part);
     void setInstrumentType(int part, polysynth::InstrumentTypeId typeId);
+#ifdef FEATURE_SYNTH_OPEN
+    // Patch change FX: the bank holds the values of the first patches of the part's engine (Patches/<ENGINE>/).
+    // reloadPatchBank is main thread only, applyPatchBankSlot runs in the audio callback and only copies floats.
+    void reloadPatchBank(int part);
+    bool applyPatchBankSlot(int part, int slot);
+#endif
 
     std::string getInstrumentTypeName(int typeIdx);
     int getInstrumentTypeIdx(int part);

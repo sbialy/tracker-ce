@@ -309,6 +309,14 @@ const char* const fxDescriptions[FX_COUNT] = {
     "\nAfter 057B, inversions:"
     "\n038: Maj/1st  059: Maj/2nd"
     "\n049: Min/1st  058: Min/2nd",
+#ifdef FEATURE_SYNTH_OPEN
+    // Sequencer::strFxConsts::enFxType::FX_TYPE_PATCH_CHANGE,
+    "Destination: Synth \n\nSwitches the Synth instrument to another patch of its engine."
+    "\n"
+    "\n"
+    "The value is the number of the patch in the Patches folder of the engine, in alphabetical order, from 0 to 15."
+    " A number with no patch is ignored.",
+#endif
     // Sequencer::strFxConsts::enFxType::FX_TYPE_BREAK_PATTERN,
     "Destination: Pattern \n\n"
     "Breaks current pattern playback and jumps to the next pattern.",

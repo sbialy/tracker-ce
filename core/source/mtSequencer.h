@@ -178,6 +178,7 @@ class Sequencer
             FX_TYPE_R1,
             FX_TYPE_GRANULAR_LENGTH = FX_TYPE_R1,
             FX_TYPE_R2,
+            FX_TYPE_PATCH_CHANGE = FX_TYPE_R2, // SYNTH_OPEN: one-shot synth patch change (bank slot)
             FX_TYPE_R3,
             FX_TYPE_R7,
             FX_TYPE_R8,

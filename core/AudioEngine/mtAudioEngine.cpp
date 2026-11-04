@@ -5,6 +5,9 @@
 #include "PolySynth/sdk/SynthVoiceSDK.h"
 #endif
 #include "SynthVoice.h"
+#ifdef FEATURE_SYNTH_OPEN
+#include "Synth.h"
+#endif
 #include "ampLogarythmicValues.h"
 #include "cr_section_macros.h"
 #include "metronomeBeep.h"
@@ -186,6 +189,9 @@ void audioEngine::init(Platform* platform, [[maybe_unused]] Synth* synth)
     AudioFilterStateVariable::initCutoffLookup();
 #ifdef FEATURE_SYNTH
     synthVoice.init(synth);
+#ifdef FEATURE_SYNTH_OPEN
+    patchBankSynth = synth;
+#endif
 #endif
 
     for (int i = 0; i < 8; i++)
@@ -1167,6 +1173,17 @@ AUDIO_CORE_RAM void audioEngine::seqSynthFx(uint8_t fx_id,
 
     setSynthParam(fxIdToSynthParam[fx_id], synthIdx, value, fxNumberToSynthValuesSource[fx_n]);
 }
+
+#ifdef FEATURE_SYNTH_OPEN
+// Audio callback (Sequencer::tick): synth patch change FX, bank slot -> part values. Ignored without a synth or a slot.
+AUDIO_CORE_RAM void audioEngine::seqPatchChange(uint8_t slot, uint8_t synthIdx)
+{
+    if (patchBankSynth != nullptr)
+    {
+        patchBankSynth->applyPatchBankSlot(synthIdx, slot);
+    }
+}
+#endif
 
 AUDIO_CORE_RAM void audioEngine::endSynthFx(uint8_t fx_id, uint8_t fx_n, uint8_t synthIdx)
 {

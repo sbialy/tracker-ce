@@ -1778,6 +1778,9 @@ AUDIO_CORE_RAM int16_t Sequencer::getFxMax(uint8_t fxID, bool forRandom)
 
         case fx.FX_TYPE_ARP: return 33;
         case fx.FX_TYPE_MIDI_CHORD: return MAX_CHORD;
+#ifdef FEATURE_SYNTH_OPEN
+        case fx.FX_TYPE_PATCH_CHANGE: return 15;
+#endif
 
         case fx.FX_TYPE_BIT_DEPTH: return BIT_DEPTH_MAX;
         case fx.FX_TYPE_TUNE: return 48;
