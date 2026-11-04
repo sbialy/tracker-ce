@@ -21,10 +21,6 @@ Not available: Polyend's DIRT and Shaping engines (they exist only in the closed
 
 The original Polyend Tracker (MK66) only. The Tracker+ and the Mini are not built or tested in this fork. Their code is still in the tree from upstream. For those devices use [upstream](https://github.com/polyend/tracker-ce).
 
-## Status
-
-An earlier pre-release build was run on one original Tracker. Audio CPU, reverb and delay tails and the synth sends were checked there. Version 1.0.0 adds the merge of upstream's relicense and file hardening and a `-Os` change to the sequencer, and has not been run on a device yet. See `synth-open/README.md` for the numbers and what was and was not measured.
-
 ## Flash
 
 1. Copy `PolyendTracker_FF_1.0.0.ptf` to the `/Firmware/` folder on the microSD card.
