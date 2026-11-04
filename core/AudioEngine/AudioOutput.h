@@ -2,6 +2,9 @@
 #define AUDIOENGINE_AUDIOOUTPUT_H_
 
 #include "Audio.h"
+#ifdef FEATURE_FF_DIRT
+#include "ff_dirt.h"
+#endif
 
 class AudioOutput
 {
@@ -31,10 +34,17 @@ class AudioOutput
     AudioMux* getLimiterSidechainMux(OutputChannels channel);
 #endif
     AudioEffectLimiter* getLimiter(OutputChannels channel);
+#ifdef FEATURE_FF_DIRT
+    AudioEffectDirt* getDirt();
+#endif
     AudioMixer<FinalMixInputs::kFinalMixerSize>* getFinalMixer(OutputChannels channel);
     AudioOutputStream* getStream();
 
   private:
+#ifdef FEATURE_FF_DIRT
+    // before the limiters: the audio objects update in creation order, so the master bus stays in the same block
+    AudioEffectDirt dirt;
+#endif
 #ifndef PLATFORM_IMX
     AudioMux limiterSidechainMux;
 #else

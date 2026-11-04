@@ -31,6 +31,7 @@ cp "$root/LICENSE" "$root/NOTICE.md" "$dest/"
 copy() { cp "$root/$1" "$dest/licenses/$2" || { echo "missing license file $1" >&2; exit 1; }; }
 copy licenses/LICENSE-OpenTracker-Apache-2.0.txt     LICENSE-OpenTracker-Apache-2.0.txt
 copy licenses/LICENSE-OpenTracker-synths-MIT.txt      LICENSE-OpenTracker-synths-MIT.txt
+copy licenses/LICENSE-OpenTracker-fx-MIT.txt          LICENSE-OpenTracker-fx-MIT.txt
 copy licenses/LICENSE-BSD-3-Clause-NXP.txt          LICENSE-BSD-3-Clause-NXP.txt
 copy licenses/LICENSE-LiberationFonts-OFL-1.1.txt   LICENSE-LiberationFonts-OFL-1.1.txt
 copy util/3rdparty/fmt/LICENSE.rst                  LICENSE-fmt-MIT.txt
@@ -74,7 +75,7 @@ Built from commit $rev of https://github.com/sbialy/tracker-ff (fork of https://
 
 LICENSE       the repository license (MIT with the Wholesale Commercial Clone Restriction): free to share, not to sell
 NOTICE.md     third-party notices and attributions
-licenses/     the full license text of every bundled third-party component (OpenTracker Apache-2.0, opentracker-synths MIT, ...)
+licenses/     the full license text of every bundled third-party component (OpenTracker Apache-2.0, opentracker-synths MIT, opentracker-fx MIT, ...)
 
 This image links neither libPolySynth.a nor libPolyDSP.a. Factory patches and .ptfx plugins are not part of this package.
 Copy only the .ptf to the SD card (Config > Firmware). The file name must stay as it is.

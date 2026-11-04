@@ -543,6 +543,20 @@ void audioEngine::connectInputToOutput(AudioInput* input, AudioOutput* output)
 
 void audioEngine::connectMixerToOutput(MixerAndFxs<kVoices>* mixerAndFxs, AudioOutput* output)
 {
+#ifdef FEATURE_FF_DIRT
+    // through the Dirt insert (off: the blocks pass untouched), AudioOutput connects it to the limiters
+    connections.push_back(
+      new AudioConnection(mixerAndFxs->getTracksAndSendsMixer(MixerAndFxChannelType::kLeft),
+                          0,
+                          output->getDirt(),
+                          0));
+
+    connections.push_back(
+      new AudioConnection(mixerAndFxs->getTracksAndSendsMixer(MixerAndFxChannelType::kRight),
+                          0,
+                          output->getDirt(),
+                          1));
+#else
     connections.push_back(
       new AudioConnection(mixerAndFxs->getTracksAndSendsMixer(MixerAndFxChannelType::kLeft),
                           0,
@@ -554,6 +568,7 @@ void audioEngine::connectMixerToOutput(MixerAndFxs<kVoices>* mixerAndFxs, AudioO
                           0,
                           output->getLimiter(AudioOutput::OutputChannels::kRight),
                           0));
+#endif
 
 #ifdef PLATFORM_IMX
     static constexpr int kPolyverbLeftUsbStreamIdx = 16;
@@ -1633,6 +1648,12 @@ void audioEngine::setSnapToZeroEnable(bool enabled)
 
 void audioEngine::setSaturationType(SaturationType type)
 {
+#ifdef FEATURE_FF_DIRT
+    // the Dirt entries run the mixers at hard clip and the master bus insert (synth-open/ff_dirt.h) on top
+    const bool dirt = type >= SaturationType::kDirtSoft;
+    output.getDirt()->setMode(dirt ? type - SaturationType::kDirtSoft + 1 : 0);
+    if (dirt) type = SaturationType::kHardClip;
+#endif
     getMixerAndFx()->getTracksMixer(MixerAndFxChannelType::kLeft)->setSaturationType(type);
     getMixerAndFx()->getTracksMixer(MixerAndFxChannelType::kRight)->setSaturationType(type);
 

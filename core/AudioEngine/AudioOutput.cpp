@@ -20,6 +20,12 @@ AudioOutput::AudioOutput()
                                               kLimiterSidechainChannelIdx));
 #endif
 
+#ifdef FEATURE_FF_DIRT
+    // the tracks and sends mixers feed the Dirt insert (mtAudioEngine.cpp, connectMixerToOutput), which feeds the limiters
+    connections.push_back(new AudioConnection(&dirt, 0, &limiter[OutputChannels::kLeft], 0));
+    connections.push_back(new AudioConnection(&dirt, 1, &limiter[OutputChannels::kRight], 0));
+#endif
+
     constexpr int kStreamInputIdx = 0;
     connections.push_back(new AudioConnection(
       &limiter[OutputChannels::kLeft], 0, &finalMixer[OutputChannels::kLeft], kStreamInputIdx));
@@ -78,6 +84,13 @@ AudioEffectLimiter* AudioOutput::getLimiter(OutputChannels channel)
 {
     return &limiter[channel];
 }
+
+#ifdef FEATURE_FF_DIRT
+AudioEffectDirt* AudioOutput::getDirt()
+{
+    return &dirt;
+}
+#endif
 
 AudioMixer<AudioOutput::FinalMixInputs::kFinalMixerSize>* AudioOutput::getFinalMixer(
   OutputChannels channel)

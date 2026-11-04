@@ -1,6 +1,6 @@
 # tracker-ff
 
-Unofficial community firmware for the **original Polyend Tracker** (the MK66 model, Cortex-M4F at 180 MHz). It is a fork of Polyend's open source firmware [polyend/tracker-ce](https://github.com/polyend/tracker-ce) (Tracker Community Edition) and adds synth engines to the original Tracker. Version 1.0.0. The name FF is the max value 0xFF.
+Unofficial community firmware for the **original Polyend Tracker** (the MK66 model, Cortex-M4F at 180 MHz). It is a fork of Polyend's open source firmware [polyend/tracker-ce](https://github.com/polyend/tracker-ce) (Tracker Community Edition) and adds synth engines to the original Tracker. Version 1.1.0. The name FF is the max value 0xFF.
 
 tracker-ff is not affiliated with, endorsed by or supported by Polyend. It is free and non-commercial.
 
@@ -11,8 +11,10 @@ Upstream CE has synth engines only on the Tracker+ and the Mini, because Polyend
 - **16 synth engines** in one image: ACD, FAT, VAP, WTFM, PERC, CHIP, JU6, PHZ, FM4, D-Type, CS-Type, A-Type, T-Type, 8-Type, B-Type and Arc-Type. Most come from [OpenTracker](https://github.com/sandlbn/polyend-tracker-re) and [opentracker-synths](https://github.com/opentracker-fw/opentracker-synths) through a shim that hosts their engine interface. CHIP is Polyend's own open Chiptune voice. PHZ is a phase distortion engine written for this project from the public manual.
 - **Polyphony and a governor.** Up to 4 voices per synth instrument, a shared voice pool (default 4, at most 8) and OpenTracker's governor, which drops voices when the audio block load gets too high.
 - **`.patch` files and pitch bend.** Patches load and save from `Patches/<ENGINE>/` on the SD card, including Polyend's factory patches. Pitch bend works from MIDI and from the Micro-tune FX.
+- **Patch slots and the Patch FX.** Every synth part keeps a bank of 16 patches in the project. The `O - Patch` step FX switches the part to one of them at a step, so a pattern can change the sound of an instrument. Slot 0 is the stock `<N>.patch`, so stock firmware opens the song with that sound.
 - **Lower idle audio CPU.** Synth parts with nothing sounding are skipped in the audio graph, idle voices send no data, the reverb and short delay sleep when silent, mixers skip empty inputs and one reverb buffer lives in internal SRAM. The details and the bench that checks the output stays bit identical are in `synth-open/README.md`.
-- **TRIM flash budget.** `TRIM=1` links with newlib-nano and builds the UI, the platform code and some cold code at `-Os`, so 16 engines fit in the original's flash. The release image ends at 0xF9F90 (1,023,888 bytes of 1,044,480 allowed). The last 4 KB sector stays free.
+- **Dirt master insert.** OpenTracker's DIRT (drive, fold, bitcrush) runs live on the master bus before the limiter. Pick `Dirt Soft`, `Dirt Hard`, `Dirt Fold`, `Dirt Asym` or `Dirt Crush` in the Saturation entry of the master screen. It costs 1.6 to 2.6 points of the audio block (emulated) and nothing in silence, see `synth-open/README.md`.
+- **TRIM flash budget.** `TRIM=1` links with newlib-nano and builds the UI, the platform code and some cold code at `-Os`, so 16 engines fit in the original's flash. The release image ends at 0xFA828 (1,026,088 bytes of 1,044,480 allowed, 1,023,888 without the Dirt insert). The last 4 KB sector stays free.
 - **Fixes.** Three out of bounds writes to `label[8]` arrays in the UI are fixed in all builds.
 
 Not available: Polyend's DIRT and Shaping engines (they exist only in the closed library). A project that uses an engine missing from the build gets that part reset to defaults on load.
@@ -23,7 +25,7 @@ The original Polyend Tracker (MK66) only. The Tracker+ and the Mini are not buil
 
 ## Flash
 
-1. Copy `PolyendTracker_FF_1.0.0.ptf` to the `/Firmware/` folder on the microSD card.
+1. Copy `PolyendTracker_FF_1.1.0.ptf` to the `/Firmware/` folder on the microSD card.
 2. On the Tracker open **Config > Firmware > Firmware update**, pick the file and confirm.
 
 Do not rename the file. The original's bootloader lists only names that start with `PolyendTrac` and are at most 31 characters long. Back up your `Projects/` folder first, because upstream CE saves patterns in a newer format that older firmware cannot read. If a build does not boot, the emergency recovery steps in [upstream's README](docs/upstream-README.md#4-flashing-on-hardware--emergency-recovery) apply.
@@ -33,7 +35,7 @@ Do not rename the file. The original's bootloader lists only names that start wi
 You need `make`, `python3` and the GNU Arm Embedded Toolchain 10.3-2021.10. Put it in `./agt/10.3/` or pass `TOOLCHAIN=/path/to/arm-none-eabi-`. Build only the original, `make all` also builds the Tracker+ and the Mini.
 
 ```bash
-# the 16 engine release image, build/PolyendTracker_FF_1.0.0.ptf
+# the 16 engine release image, build/PolyendTracker_FF_1.1.0.ptf
 make original SYNTH_OPEN=1 TRIM=1 \
   SYNTH_ENGINES="ACD FAT VAP WTFM PERC CHIP JU6 PHZ FM4 DTYPE CSTYPE ATYPE TTYPE 8TYPE BTYPE ARCTYPE"
 

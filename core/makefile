@@ -82,6 +82,10 @@ SYNTH_OPT_PHZ ?= -O2 -ffp-contract=off
 $(OBJ_DIR)/synth-open/phz/phz.o: EXTRA_OPT := $(SYNTH_OPT_PHZ)
 $(SYNTH_GUI_OBJS): EXTRA_OPT := $(SYNTH_OPT_GUI)
 $(OBJ_DIR)/synth-open/open_synth.o: EXTRA_OPT := $(SYNTH_OPT_SHIM)
+# Dirt: FMA fusing costs 3 cycles on the M4F against 2 for a separate multiply and add, so no contraction
+SYNTH_OPT_DIRT ?= -O2 -ffp-contract=off
+$(OBJ_DIR)/synth-open/ff_dirt.o: EXTRA_OPT := $(SYNTH_OPT_DIRT)
+$(OBJ_DIR)/synth-open/ff_dirt_ctl.o: EXTRA_OPT := -Os
 $(OBJ_DIR)/synth-open/open_cold.o $(OBJ_DIR)/synth-open/open_patchio.o $(OBJ_DIR)/synth-open/stub_fmt.o: EXTRA_OPT := $(SYNTH_OPT_COLD)
 $(OBJ_DIR)/synth-open/ot/audio/engines/fat.o: EXTRA_OPT := $(SYNTH_OPT_FAT)
 
@@ -141,6 +145,12 @@ DEFINES+=-DFEATURE_SYNTH -DFEATURE_SYNTH_OPEN $(SYNTH_ENGINE_DEFINES)
 REVERB_SRAM ?= 1
 DEFINES+=-DFW_REVERB_SRAM=$(REVERB_SRAM)
 INCLUDES+=-I$(SYNTH_OPEN_DIR) -I$(SYNTH_OPEN_DIR)/ot
+# FF_DIRT=1 (default): the live Dirt master bus insert (synth-open/ff_dirt.cpp), five new entries in the master screen's Saturation list. FF_DIRT=0 leaves
+# it out (the class stays unused, the list keeps its five stock entries). A define is not a make dependency: build FF_DIRT=0 with its own SYNTH_TAG.
+FF_DIRT ?= 1
+ifeq ($(FF_DIRT),1)
+DEFINES+=-DFEATURE_FF_DIRT
+endif
 endif
 else ifeq ($(PLATFORM), IMX)
 COMPILER_OPTIONS+=-mcpu=cortex-m7 -mfpu=fpv5-sp-d16 -mfp16-format=ieee

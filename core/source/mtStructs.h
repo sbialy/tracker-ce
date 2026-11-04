@@ -592,6 +592,14 @@ enum SaturationType
     kSaturate,
     kOverdrive,
     kOverdrive2,
+#ifdef FEATURE_FF_DIRT
+    // Live Dirt master insert (synth-open/ff_dirt.h), the mixers run hard clip under these
+    kDirtSoft,
+    kDirtHard,
+    kDirtFold,
+    kDirtAsym,
+    kDirtCrush,
+#endif
     kSaturationTypeEnd
 };
 

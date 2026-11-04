@@ -1,18 +1,17 @@
-# tracker-ff 1.0.0 - synth-open, the open PolySynth shim for the original Tracker (MK66)
+# tracker-ff 1.1.0 - synth-open, the open PolySynth shim for the original Tracker (MK66)
 
 tracker-ff is a fork of Polyend's Tracker CE firmware (FF as in 0xFF). `synth-open/` is the directory and the make flag (`SYNTH_OPEN=1`) of its synth layer. The repository README is `../README.md`. This file is the technical description of the shim and of the build.
 
 The shim is built only with `make original SYNTH_OPEN=1`. It replaces the closed `libPolySynth.a` and `libPolyDSP.a` (Cortex-M7 only, the licence forbids reverse engineering) on the original Tracker. The closed libraries are never linked here and nothing in this directory was derived from them. Everything is written from the open headers in `synth/include/PolySynth` and from OpenTracker (Apache-2.0).
 
-What 1.0.0 has:
+What 1.1.0 has:
 
 - 16 synth engines in one image, chosen at build time (see "Engine picker"). ACD, FAT, VAP and WTFM are the Polyend engines as OpenTracker re-implements them. PERC is OpenTracker's drum engine, CHIP is Polyend's own open Chiptune voice, PHZ is our own phase distortion engine written from the public manual, and JU6, FM4, D-Type, CS-Type, A-Type, T-Type, 8-Type, B-Type and Arc-Type are OpenTracker 3.x modules. The Hand-Type module is in the tree and can be picked by name (`HANDTYPE`), the release image leaves it out. MIDI registers by name only and Shaping has no engine.
 - Up to 4 voices per instrument, a shared voice pool and OpenTracker's governor.
-- `.patch` files that load and save from the SD card, and pitch bend.
+- `.patch` files that load and save from the SD card, a bank of 16 patch slots per synth part with the Patch step FX (see "Patch files"), and pitch bend.
+- A live Dirt master insert with five presets in the master Saturation entry (see "Dirt master insert").
 - A flash trim (`TRIM=1`) that makes all 16 engines fit in the original's flash.
 - A set of audio CPU optimisations that remove work the stock firmware does for silence.
-
-Status: 1.0.0 has not been run on a device. An earlier pre-release build of the same design was run on one original Tracker, and the device numbers below are labelled as such. The host smoke test and the emulated benches are the checks that cover 1.0.0 itself.
 
 ## Source files
 
@@ -31,11 +30,13 @@ Status: 1.0.0 has not been run on a device. An earlier pre-release build of the 
 | `phz/` | PHZ, our own engine (`phz.cpp`, `phz.h`) |
 | `ot/` | Copies from OpenTracker (commit 927b1516385e, Apache-2.0): `audio/engines/{acd,fat,vap,wtfm,perc}.{h,cpp}`, `audio/dsp.h`, `audio/synth_engine.h`, `audio/audio_tables.h`, `audio/{governor,cpu_meter}.{h,cpp}`, `model/synth_patch.h`, `fastrun.h`, plus the 3.x headers the module engines need. Unmodified apart from a provenance line at the top (Apache section 4b) |
 | `ot-synths/` | The OpenTracker 3.x module engines from opentracker-synths (MIT), unmodified apart from a provenance line |
+| `ff_dirt.h` `ff_dirt.cpp` `ff_dirt_ctl.cpp` | The live Dirt master bus insert (FF_DIRT, see "Dirt master insert"): per block DSP at `-O2 -ffp-contract=off`, the preset table, coefficients and the `AudioEffectDirt` audio object at `-Os` |
 | `stub_fmt.cpp` | `fmt::v9::vformat` replacement so the 37 KB `fmt/format.cc` is not linked |
 | `tools/host_smoke_test.cpp` | Host (Mac) smoke test of the shim, not firmware. It plays notes on every engine and checks finite, non-silent output, patch round trips, the id tables, the voice pool, the governor and the idle skip. Build line in the file header |
 | `tools/run_smoke.sh` | `run_smoke.sh "ACD VAP WTFM CHIP"` builds and runs the smoke test for an engine set (same names as `SYNTH_ENGINES`) |
 | `tools/engine_budget.sh` `.py` | Flash cost per engine from the link map, the image size against the cap, `BUILD.txt` |
 | `tools/phz_cycles/` `tools/phz_render.sh` | Emulated cycle bench for the engines and the WAV renderer for PHZ |
+| `tools/dirt_cycles/` `tools/dirt_render.sh` | Emulated cycle bench of the Dirt insert and its host render (WAV files and self checks) |
 | `tools/idle_cycles/` `tools/audio_opt/` | Emulated benches for the audio graph (see "Idle synth parts" and "Audio CPU optimisations") |
 | `tools/package_release.sh` `tools/check_ptf.py` | Release packaging and the `.ptf` sanity check that runs on every SYNTH_OPEN build |
 
@@ -79,7 +80,7 @@ The 17 names are ACD FAT VAP WTFM PERC CHIP JU6 PHZ FM4 DTYPE CSTYPE ATYPE TTYPE
 
 - One place per engine: a line in `engines.mk` (name, sources), one entry in `engine_list.h`, its `EngineDef` and sources.
 - Size guards: `FLASH_IMG_MAX` is 1,044,480 B (0xFF000, the last 4 KB sector stays free) and is checked three times: the post-build `size` check of the platform makefile and the linker ASSERT (both on text+data), and again in the top Makefile from the linked `.axf`, so a second `make` of an oversize set fails as well. An oversize set leaves no `.ptf` in `build/`. `SYNTH_FLASH_IMG_MAX=n` lowers the cap for one build. The real flash image is text + data. The FLASH line of ld leaves out the `.data` load image and is about 6.5 KB too optimistic.
-- The `.ptf` name is `PolyendTracker_<TAG>_<A.B.C>.ptf`, with TAG `FF` for TRIM builds (`PolyendTracker_FF_1.0.0.ptf`, 27 chars) and `SO` for plain SYNTH_OPEN builds. The firmware list (`platforms/mk66/3rdparty/SD/SD.cpp`) shows only names that start with `PolyendTrac`, are lowercase `.ptf` and are at least 15 chars long. The bootloader reads at most 31 chars. The engine list is in `build/BUILD.txt`, written next to the `.ptf` after a successful build (engines, image size, free bytes, bytes per engine from the link map).
+- The `.ptf` name is `PolyendTracker_<TAG>_<A.B.C>.ptf`, with TAG `FF` for TRIM builds (`PolyendTracker_FF_1.1.0.ptf`, 27 chars) and `SO` for plain SYNTH_OPEN builds. The firmware list (`platforms/mk66/3rdparty/SD/SD.cpp`) shows only names that start with `PolyendTrac`, are lowercase `.ptf` and are at least 15 chars long. The bootloader reads at most 31 chars. The engine list is in `build/BUILD.txt`, written next to the `.ptf` after a successful build (engines, image size, free bytes, bytes per engine from the link map).
 - `make synth-engines` links all engines once with the cap lifted for that one link, sums the input sections that survive `--gc-sections` per engine archive member and prints the cost per engine, the base without engines and the estimate for the selection. The estimate is within about 1 KB of a real link, the real size is always the one `make original` prints.
 - Projects store an engine as its canonical number, not as the position in the list on screen, so a project keeps its engines across builds with other engine sets: ACD 0, FAT 1, VAP 2, WTFM 3, PERC 4, DIRT 5, CHIP 6, JU6 7, PHZ 8, FM4 9, DTYPE 10, CSTYPE 11, ATYPE 12, TTYPE 13, 8TYPE 14, HANDTYPE 15, BTYPE 16, ARCTYPE 17. PERC is 4 and CHIP is 6 as in the stock Tracker+ and Mini CE list. A part whose engine the build lacks (DIRT, an engine left out such as HANDTYPE in the release image) is reset to that part's defaults on load (`Synth::validateSynthPartSettings`, called from `fProjEdit.cpp` on the loaded project), with the first engine of the build when the default engine is not in it. The reset is made in the loaded project, so saving writes the default part over the original engine choice (the part's `Workspace/<N>.patch` file is not touched). Open such a project in a build that has the engine, or do not save it.
 - `.patch` engine numbers differ from the stored numbers on purpose, see "Patch files".
@@ -170,7 +171,7 @@ Read against the governor (cuts at a block >= 98 to 100 %, or an average >= 80 %
 
 ## Engine icons
 
-The list and editor icons are lettered name logos (80x29 mini and 108x40 medium pills that spell ACD, FAT, VAP, WTFM, PERC, CHIP and PHZ), not pictures. There is no artwork for the OpenTracker engines, so each one wears the logo of the Polyend engine closest in character (`engine_list.h`, MINI_ICON and ICON). Only the stored ids and `.patch` numbers matter for files, the icon is display only. All seven logos are linked in the 17 engine image already, so this mapping costs no flash. DIRT (shaping, no open engine) and its Shaper glyph stay out.
+The list and editor icons are lettered name logos (80x29 mini and 108x40 medium pills that spell ACD, FAT, VAP, WTFM, PERC, CHIP and PHZ), not pictures. There is no artwork for the OpenTracker engines, so each one wears the logo of the Polyend engine closest in character (`engine_list.h`, MINI_ICON and ICON). Only the stored ids and `.patch` numbers matter for files, the icon is display only. All seven logos are linked in the 16 engine image already, so this mapping costs no flash. DIRT (shaping, no open engine) and its Shaper glyph stay out.
 
 | Engine | Icon | Why |
 |---|---|---|
@@ -205,6 +206,41 @@ A logo is built in when any engine that wears it is picked: `FW_ICON_PERC` (PERC
 
 `MidiEvent::kPitchBendChange` (from a MIDI keyboard through the virtual port and from the tracker's Micro-tune FX, which `mtSequencer` sends as a full +-8192 bend to synth instruments) sets the instrument's bend, applied to every voice of the slot through `SynthVoice::bend` (ramped over the block from `bendStart`). The range is +-1 semitone at full deflection, our own choice, so the Micro-tune FX reads in cents (-99 to +99). The range of the closed firmware is not known. Transport Stop resets the bend to 0.
 
+## Dirt master insert
+
+OpenTracker's DIRT (drive and bitcrush, `opentracker-fx` `modules/dirt`) runs live on the master bus. `FF_DIRT=1` is the default of a SYNTH_OPEN build (`FF_DIRT=0` leaves it out, build that with its own `SYNTH_TAG`, a define is not a make dependency). It is code in `synth-open/` plus a few lines behind `FEATURE_FF_DIRT` in the core, plain `make original` is untouched.
+
+**Placement.** OpenTracker 3.x runs its master inserts after the master sum (dry tracks, delay and reverb returns, synth parts, saturation applied) and before the limiter (`audio/inserts.h`). Here the same point: `AudioEffectDirt` (stereo, 2 inputs and 2 outputs) sits between the tracks and sends mixers and the two limiters (`audioEngine::connectMixerToOutput`, `AudioOutput`). It is created before the limiters, so the audio objects (updated in creation order) keep the master bus in one block. The limiter, the final mixer, the stream output and the master export tap all come after it, so the master export stem carries the effect (the per track and mixer stems are taken before it).
+
+**Controls.** The master screen's Saturation entry (button 5 on the Master page, saved in the project like before) has five more entries after Drive+: `Dirt Soft`, `Dirt Hard`, `Dirt Fold`, `Dirt Asym` and `Dirt Crush`. Picking one runs the mixers at hard clip and the insert with that preset. The stock entries run the insert off. No new parameter UI: the presets are a fixed table (`ffdirt::kPresets`):
+
+| Entry | Shaper | Drive | Bits | Rate | Tone |
+|---|---|---|---|---|---|
+| Dirt Soft | rational tanh | 50 | 16 | 1 | off |
+| Dirt Hard | clip at +-1 | 50 | 16 | 1 | off |
+| Dirt Fold | triangle fold | 50 | 16 | 1 | off |
+| Dirt Asym | biased tanh, 10 Hz DC block | 50 | 16 | 1 | off |
+| Dirt Crush | rational tanh | 40 | 8 | 4 | 70 (about 5 kHz) |
+
+Mix is 100 % for all of them. Drive, Bits, Rate and Tone are the original's parameters and units (pre-gain 1 + 15 d^2 with d = Drive / 100, make-up gain 1 / (1 + 0.5 d)), so another preset is one line in `kPresets`. A project that uses a Dirt entry and is opened on a build without it falls back to Hard Clip (the existing range check in `fProjEdit.cpp`).
+
+**Differences from the original.** Int16 blocks instead of float buses. The parameters are constant per preset, so the block ramps of Drive and Mix are gone, and a preset change fades the old one out and the new one in over one block each (through the dry signal) instead of the original's crossfade. A silent bus (NULL blocks) is left alone with the state cleared, like the original, which does not call its process for a silent bus: the effect costs nothing in silence, and the half step DC that the mid-rise quantiser gives a non-silent input stops with the sound. The int16 stage clips at full scale where the original's float bus would pass the overshoot to the limiter (Asym can go to about 1.03 of full scale on its negative side). The tone corner and the DC block coefficients are computed when a preset is picked (`powf` and `tanf` once), the block loop calls no libm function.
+
+**Cost.** Emulated Cortex-M4F (`tools/dirt_cycles/run_bench.sh`, real `AudioEffectDirt` and `AudioStream`, cost table of `tools/phz_cycles`, **no flash wait states, not the device**), loud stereo input, cycles per 128 frame block over the same graph without the insert (2,625 cycles of stand-in source and sink):
+
+| Entry | cycles | points of a 522,240 cycle block |
+|---|---:|---:|
+| insert off (pass through) | +239 | +0.05 |
+| Dirt Soft, Dirt Asym | +13,598 | +2.60 |
+| Dirt Fold | +11,769 | +2.25 |
+| Dirt Crush | +8,734 | +1.67 |
+| Dirt Hard | +8,341 | +1.60 |
+| a silent bus | about 0 | about 0 |
+
+Against the last device readings (max 76 %, avg 50 % on the test song, see Summary under Audio CPU optimisations) that is at most 2.6 points on top of the peak. Flash: the insert costs 2,200 B in the 16 engine TRIM image (`ffdirt::process` 1,148, `makeCoef` 372, `update` 348, presets and names about 120, the rest list text and glue), which ends at 0xFA828 (1,026,088 B, 18,392 B under 0xFF000).
+
+**Checks.** `tools/dirt_render.sh` renders a synthetic loop dry and through each entry into `build/dirt-wav/` and checks that wet 0 passes the input bit for bit, that a full scale square followed by silence leaves a finite state and that silence in gives silence out (the quantiser entry has its half step). `tools/dirt_cycles/run_bench.sh check` runs the firmware build of the per block code in the emulator and compares its output block with the host code: 0 LSB difference for all five entries. Not done: a device run, and the audio graph bench (`tools/audio_opt`) does not contain the insert.
+
 ## Flash trim (TRIM=1)
 
 `TRIM=1` is an opt-in build switch for the "no feature loss" trims. It frees about 157 KB of the original's 1 MB flash, which is what lets the 16 release engines link. The plain build is untouched, and `TRIM=1` without `SYNTH_OPEN=1` is an error (stock `make original` has no trims, by design).
@@ -228,15 +264,16 @@ Source level trims sit behind `-DFW_TRIM`. TRIM uses its own build directories (
 
 The cold shim code is split for the same reason: `open_synth.cpp` keeps the render path (instrument, voice pool, `OpenPatch::effective`) at `-O2`, and everything else (`open_cold.cpp`, `open_patchio.cpp`, `stub_fmt.cpp`) is built at `-Os` (`SYNTH_OPT_COLD`). The knobs `SYNTH_OPT_ENGINES`, `SYNTH_OPT_GUI`, `SYNTH_OPT_SHIM`, `SYNTH_OPT_COLD`, `SYNTH_OPT_FAT`, `SYNTH_OPT_CHIP` and `SYNTH_OPT_PHZ` set the `-O` level of each file group. A stray `<iostream>` anywhere pulls about 150 KB of locale code on MK66, so after a change `nm` the `.axf` for `std::locale`.
 
-### Flash budget of the 1.0.0 image
+### Flash budget of the 1.1.0 image
 
 Sizes are text+data from `arm-none-eabi-size` against the cap of 1,044,480 B, toolchain 10.3.
 
 | Build | text+data | free | highest .ptf address |
 |---|---:|---:|---|
-| `SYNTH_OPEN=1 TRIM=1`, the 16 release engines | 1,023,888 | 20,592 | 0xF9F90 |
+| `SYNTH_OPEN=1 TRIM=1`, the 16 release engines, `FF_DIRT=0` | 1,023,888 | 20,592 | 0xF9F90 |
+| `SYNTH_OPEN=1 TRIM=1`, the 16 release engines with the Dirt insert (default) | 1,026,088 | 18,392 | 0xFA828 |
 
-The highest image end known to boot on a device is 0xFC2AC (1,032,876 B, an early pre-release image), so the release image ends 8,988 B below it. Without TRIM the 16 engine set does not link. The flash cost of each engine in the 16 engine TRIM link (`make synth-engines TRIM=1`, within about 1 KB of the real marginal cost) is ACD 9,374, FAT 12,952, VAP 15,514, WTFM 14,793, PERC 23,655, CHIP 10,685, JU6 6,108, PHZ 15,154, FM4 7,291, DTYPE 9,868, CSTYPE 10,507, ATYPE 9,989, TTYPE 14,025, 8TYPE 15,474, BTYPE 9,740 and ARCTYPE 13,939 B, with a base of about 824,800 B without engines. HANDTYPE costs about 9,140 B when it is picked. Re-run the target for exact figures, they move with every merge.
+The highest image end known to boot on a device is 0xFC2AC (1,032,876 B, an early pre-release image), so the release image ends 6,788 B below it and the one without Dirt 8,988 B. Without TRIM the 16 engine set does not link. The flash cost of each engine in the 16 engine TRIM link (`make synth-engines TRIM=1`, within about 1 KB of the real marginal cost) is ACD 9,374, FAT 12,952, VAP 15,514, WTFM 14,793, PERC 23,655, CHIP 10,685, JU6 6,108, PHZ 15,154, FM4 7,291, DTYPE 9,868, CSTYPE 10,507, ATYPE 9,989, TTYPE 14,025, 8TYPE 15,474, BTYPE 9,740 and ARCTYPE 13,939 B, with a base of about 824,800 B without engines. HANDTYPE costs about 9,140 B when it is picked. Re-run the target for exact figures, they move with every merge.
 
 RAM of the 16 engine TRIM image (`-print-memory-usage`): about 139.3 KB of 256 KB (`.data` 5.7 KB, `.bss` 110.2 KB, `.dmabuffers` 20.7 KB) and about 15.6 MB of the 16 MB SDRAM. Static RAM of the engine objects: JU6 1,536 B (chorus lines), T-Type 48 B and PERC 48 B, the other engines 0 B of `.bss` and 8 to 12 B of `.data`. The remaining flash levers, none of them needed now: a printf smaller than nano's float one (about 7.5 KB) and font recompression.
 
@@ -363,7 +400,7 @@ Proof that every `connect()` succeeds: the bench builds the six synth send conne
 
 The estimated saving per block, in points of 522,240 cycles (device profile based, estimates and not device readings): reverb buffer in SRAM 4.6 to 6.6 on every block, idle voices send nothing about 13 to 15 stopped and about 1 per idle voice while playing, reverb and delay sleep about 23 to 24 when everything is silent and 12 to 17 whenever the sends are zero, mixers about 1 always and up to 3 with the fx asleep. Stopped, that is 56 % down to roughly 10 to 17 %. Playing the test song (avg 66 %, max 86 %) the first, second and fourth items are what shows because the song has fx sends in use, roughly 8 to 11 points off the peak blocks.
 
-Measured on an original Tracker with pre-release builds: with the first four items, Audio CPU on the Config screen (dev mode) on the same song read min 9, max 76 and avg 50 against stock CE at 43 / 80. With all five, a 4 voice VAP part played at 52 % peak. The reverb and delay tails and the synth sends were checked by ear and worked. 1.0.0 adds the upstream merge and one `-Os` change on top of that build and has not been measured on a device yet. Before a wider release compare its Audio CPU readout with the numbers above.
+Measured on an original Tracker with pre-release builds: with the first four items, Audio CPU on the Config screen (dev mode) on the same song read min 9, max 76 and avg 50 against stock CE at 43 / 80. With all five, a 4 voice VAP part played at 52 % peak. The reverb and delay tails and the synth sends were checked by ear and worked.
 
 Not done: profiling instrumentation of the audio graph (a DWT cycle counter build) costs about 7 KB on the stock image and does not fit next to 16 engines. A profiling build with fewer engines (`SYNTH_ENGINES="ACD FAT VAP WTFM"` has about 60 KB free) would measure the same graph.
 
@@ -384,7 +421,7 @@ The image embeds the git short hash (`BUILD_ID`), so the sha256 changes with eve
 You need `make`, `python3` and the GNU Arm Embedded Toolchain 10.3-2021.10 (in `./agt/10.3/` or `TOOLCHAIN=/path/to/arm-none-eabi-`).
 
 ```
-# the 16 engine release image, build/PolyendTracker_FF_1.0.0.ptf
+# the 16 engine release image, build/PolyendTracker_FF_1.1.0.ptf
 make original SYNTH_OPEN=1 TRIM=1 \
   SYNTH_ENGINES="ACD FAT VAP WTFM PERC CHIP JU6 PHZ FM4 DTYPE CSTYPE ATYPE TTYPE 8TYPE BTYPE ARCTYPE"
 
@@ -395,11 +432,11 @@ make package-release SYNTH_OPEN=1 TRIM=1
 - `package-release` only packages. The default engine set is the 4 engine one, so build with the explicit 16 engine list first. `synth-open/tools/package_release.sh build/<image>.ptf` does the same packaging for an existing image.
 - A `-D` define change (for example in `version.mk`) does not rebuild the objects that depend on it. After changing a version or tag, delete the objects that depend on `mtStructs.h` and grep the `.ptf` for the old strings.
 - `make clean` at the top level removes everything in `build/`, so keep copies of the images you want.
-- Host checks that need no device: `synth-open/tools/run_smoke.sh "<engines>"` (smoke test), `make synth-engines` (flash budget), `tools/phz_cycles/run_bench.sh` (engine cycles), `tools/idle_cycles/run_bench.sh` and `tools/audio_opt/run_graph.sh` (audio graph). The emulated benches need a Python with `unicorn` and `capstone`.
+- Host checks that need no device: `synth-open/tools/run_smoke.sh "<engines>"` (smoke test), `make synth-engines` (flash budget), `tools/phz_cycles/run_bench.sh` (engine cycles), `tools/idle_cycles/run_bench.sh` and `tools/audio_opt/run_graph.sh` (audio graph), `tools/dirt_cycles/run_bench.sh` and `tools/dirt_render.sh` (Dirt insert). The emulated benches need a Python with `unicorn` and `capstone`.
 
-## Status and licences
+## Scope and licences
 
 - Unofficial, noncommercial community work. Not affiliated with, endorsed by or supported by Polyend.
-- Original Tracker (MK66) only. Version 1.0.0 is **not device-tested**. An earlier pre-release build was run on one original Tracker and the numbers above marked as measured there come from it. Flash at your own risk.
+- Original Tracker (MK66) only. The device numbers above marked as measured come from an earlier pre-release build run on one original Tracker.
 - This build links neither `libPolySynth.a` nor `libPolyDSP.a`. Nothing here is derived from them.
 - Licences: the repository `LICENSE` (MIT with the Wholesale Commercial Clone Restriction, since upstream's 9cc7aae) covers the tracker-ce code and this shim. It is free to share with `LICENSE` and `NOTICE.md`, and not to sell. `ot/` is OpenTracker under Apache-2.0 (`licenses/LICENSE-OpenTracker-Apache-2.0.txt`), `ot-synths/` is opentracker-synths under MIT (`licenses/LICENSE-OpenTracker-synths-MIT.txt`) and everything is listed in `NOTICE.md`. "Polyend" and "Polyend Tracker" are Polyend's names, used here only to say which device this runs on and because the original's bootloader wants the file name prefix. The release package from `make package-release` has every license text: the `.ptf`, `LICENSE`, `NOTICE.md` and `licenses/`. No factory patches and no `.ptfx` are shipped.

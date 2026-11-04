@@ -18,12 +18,19 @@ static const uint16_t framesPlaces[8][4] = {
     { (800 / 8) * 7 + 1, 31, 800 / 8 - 3, 391 },
 };
 
-const char* const saturationListTexts[5] = { "Hard Clip",
-                                             "Soft Clip",
-                                             "Saturate",
-                                             "Overdrive",
-                                             "Drive+"
-
+const char* const saturationListTexts[kSaturationTypeEnd] = { "Hard Clip",
+                                                             "Soft Clip",
+                                                             "Saturate",
+                                                             "Overdrive",
+                                                             "Drive+"
+#ifdef FEATURE_FF_DIRT
+                                                             ,
+                                                             "Dirt Soft",
+                                                             "Dirt Hard",
+                                                             "Dirt Fold",
+                                                             "Dirt Asym",
+                                                             "Dirt Crush"
+#endif
 };
 
 void cMasterParams::initDisplayControls()
@@ -234,7 +241,7 @@ void cMasterParams::initDisplayControls()
 
     saturationListData.linesCount = 5;
     saturationListData.start = 0;
-    saturationListData.length = 5;
+    saturationListData.length = kSaturationTypeEnd;
     saturationListData.data = (char**)saturationListTexts;
 
     strControlProperties saturationListProperties;
