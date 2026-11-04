@@ -49,6 +49,21 @@ static const int synthModelListImages[Synth::kSynthTypes.size()] = {
 
 static cInstrumentEditor* IE = &instrumentEditor;
 
+#ifdef FEATURE_SYNTH_OPEN
+// Heading of the patch panel on the right of the Synth screen: the open patch slot of the part (0..15, the value of the Patch FX)
+static const char* synthPatchPanelLabel(int synthPart)
+{
+    static char text[12];
+    snprintf(text, sizeof(text), "Slot %d:", IE->getSynth()->getPatchSlot(synthPart));
+    return text;
+}
+#else
+static const char* synthPatchPanelLabel(int)
+{
+    return "Patch:";
+}
+#endif
+
 static void functSynthActionButtons(uint8_t button);
 static void functSynthLoad();
 static void functSynthEditPatch();
@@ -132,6 +147,9 @@ void cInstrumentEditor::changeSynthParamValue(int value, ValueChangeSource sourc
         case 3: changeSynthPanning(value); break;
         case 4: changeSynthReverbSend(value); break;
         case 5: changeSynthDelaySend(value); break;
+#ifdef FEATURE_SYNTH_OPEN
+        case 6: changeSynthSlot(value); break;
+#endif
     }
 }
 
@@ -308,9 +326,14 @@ static void functSynthConfirmLoad()
         }
     }
 
-    polystrncpy(mtProject.values.synthPart[syntPartIdx].patchName,
-                IE->getSynth()->getPatchName(syntPartIdx).c_str(),
-                sizeof(SynthPartSettings::patchName));
+#ifdef FEATURE_SYNTH_OPEN
+    if (IE->getSynth()->getPatchSlot(syntPartIdx) == 0) // the project stores the name of slot 0 only
+#endif
+    {
+        polystrncpy(mtProject.values.synthPart[syntPartIdx].patchName,
+                    IE->getSynth()->getPatchName(syntPartIdx).c_str(),
+                    sizeof(SynthPartSettings::patchName));
+    }
 
     IE->getSynth()->initSynthPartMacrosValues(syntPartIdx, mtProject.values.synthPart[syntPartIdx]);
     engine.refreshSynthInstrumentParams(mtProject.values.synthPart[syntPartIdx], syntPartIdx);
@@ -400,6 +423,9 @@ static void functSynthLoadMiniMiddle(uint8_t state)
 static void functSynthEditPatch()
 {
     sequencer.stopManualNotes();
+#ifdef FEATURE_SYNTH_OPEN
+    IE->getSynth()->restorePatchFx(mtProject.values.lastUsedInstrument - SYNTH_INSTRUMENTS_START_IDX);
+#endif
     IE->mode = mtInstEditModeSynthPatchEdit;
     IE->lightUpPadBoard();
     IE->showSynthPatchEditorScreen();
@@ -433,6 +459,11 @@ void cInstrumentEditor::changeSynthModel(int16_t value)
         return;
     }
 
+#ifdef FEATURE_SYNTH_OPEN
+    // An engine change keeps the slot files of the old engine (see Synth::setInstrumentType): an edited slot 1..15 is
+    // written before the engine goes, slot 0 is replaced by the new Init patch as it always was
+    synth->flushPatchSlot(syntPartIdx);
+#endif
     synth->setInstrumentType(syntPartIdx, Synth::kSynthTypes.at(newUi));
 
     changeSynthPolyphony(0);
@@ -443,6 +474,57 @@ void cInstrumentEditor::changeSynthModel(int16_t value)
     lightUpPadBoard();
     newFileManager.setProjectStructChanged();
 }
+
+#ifdef FEATURE_SYNTH_OPEN
+// Slot selector (7th place of the Synth screen, encoder or up/down). Opens slot 0..15 of the part: the open slot is saved if it was
+// edited, the slot's file is loaded, a slot without a file starts as a copy of the open one. A slot that holds a file of another
+// engine cannot be opened (the engine was changed after it was made), the selector steps over it.
+void cInstrumentEditor::changeSynthSlot(int16_t value)
+{
+    using polysynth::open::SlotSelect;
+
+    const int syntPartIdx = mtProject.values.lastUsedInstrument - SYNTH_INSTRUMENTS_START_IDX;
+    assert(syntPartIdx >= 0 && syntPartIdx < kSynthInstrumentsCount);
+
+    const int step = value < 0 ? -1 : 1;
+    const int from = synth->getPatchSlot(syntPartIdx);
+    SlotSelect result = SlotSelect::kSame;
+    int target = from + value;
+
+    getSynth()->triggerTestNote(syntPartIdx, kSynthPreviewNote1, false);
+    getSynth()->triggerTestNote(syntPartIdx, kSynthPreviewNote2, false);
+
+    for (target = clamp<int>(target, 0, Synth::kPatchSlots - 1); target != from; target += step)
+    {
+        result = synth->selectPatchSlot(syntPartIdx, target);
+        if (result != SlotSelect::kOtherEngine || target + step < 0 || target + step >= Synth::kPatchSlots)
+        {
+            break;
+        }
+    }
+
+    if (result == SlotSelect::kOtherEngine)
+    {
+        mtPopups.show(0, "Slot has other engine");
+        return;
+    }
+    if (result == SlotSelect::kError)
+    {
+        mtPopups.show(0, "Error loading slot");
+        return;
+    }
+    if (result == SlotSelect::kSame)
+    {
+        return;
+    }
+
+    // a loaded patch resets the macro knobs, as every patch load does
+    synth->initSynthPartMacrosValues(syntPartIdx, mtProject.values.synthPart[syntPartIdx]);
+    engine.refreshSynthInstrumentParams(mtProject.values.synthPart[syntPartIdx], syntPartIdx);
+    newFileManager.setProjectStructChanged();
+    showSynthPatchName(syntPartIdx);
+}
+#endif
 
 void cInstrumentEditor::changeSynthPolyphony(int16_t value)
 {
@@ -745,7 +827,11 @@ void cInstrumentEditor::revertPatch()
     int syntPartIdx = mtProject.values.lastUsedInstrument - SYNTH_INSTRUMENTS_START_IDX;
     assert(syntPartIdx >= 0 && syntPartIdx < kSynthInstrumentsCount);
 
+#ifdef FEATURE_SYNTH_OPEN
+    synth->revertCurrentPatch(syntPartIdx, previousPatchName);
+#else
     synth->loadPatchFromWorkspace(syntPartIdx, previousPatchName);
+#endif
 }
 
 void cInstrumentEditor::initCurrentPatch()
@@ -758,9 +844,14 @@ void cInstrumentEditor::initCurrentPatch()
     IE->getSynth()->initSynthPartMacrosValues(syntPartIdx, mtProject.values.synthPart[syntPartIdx]);
     engine.refreshSynthInstrumentParams(mtProject.values.synthPart[syntPartIdx], syntPartIdx);
 
-    polystrncpy(mtProject.values.synthPart[syntPartIdx].patchName,
-                IE->getSynth()->getPatchName(syntPartIdx).c_str(),
-                sizeof(SynthPartSettings::patchName));
+#ifdef FEATURE_SYNTH_OPEN
+    if (IE->getSynth()->getPatchSlot(syntPartIdx) == 0) // the project stores the name of slot 0 only
+#endif
+    {
+        polystrncpy(mtProject.values.synthPart[syntPartIdx].patchName,
+                    IE->getSynth()->getPatchName(syntPartIdx).c_str(),
+                    sizeof(SynthPartSettings::patchName));
+    }
 
     newFileManager.setProjectStructChanged();
 
@@ -775,6 +866,10 @@ void cInstrumentEditor::initCurrentPatch()
 
 void cInstrumentEditor::showSynthParamsScreen()
 {
+#ifdef FEATURE_SYNTH_OPEN
+    // a song that ran the Patch FX may have left another slot's values in the part: the editor shows the open slot's own
+    IE->getSynth()->restorePatchFx(mtProject.values.lastUsedInstrument - SYNTH_INSTRUMENTS_START_IDX);
+#endif
     showTitleBar();
     refreshFramePosition();
 
@@ -823,7 +918,7 @@ void cInstrumentEditor::showSynthParamsScreen()
     showSynthDelaySend(syntPartIdx);
     showSynthPatchName(syntPartIdx);
 
-    display.setControlText(noteLabel, "Patch:");
+    display.setControlText(noteLabel, synthPatchPanelLabel(syntPartIdx));
     display.setControlStyle(noteLabel, controlStyleShow | controlStyleCenterY | controlStyleFont4);
     display.setControlStyle2(noteLabel, controlStyleShow | controlStyleCenterY | controlStyleFont2);
     display.setControlColors(noteLabel, display.getTheme().activeButtonLabelsColors);
@@ -1002,6 +1097,7 @@ void cInstrumentEditor::showSynthPatchName(uint8_t synthPart)
 {
     polystrncpy(
       synthPatchNameText, synth->getPatchName(synthPart).c_str(), sizeof(synthPatchNameText));
+    display.setControlText(noteLabel, synthPatchPanelLabel(synthPart));
     display.setControlText2(noteLabel, synthPatchNameText);
     display.setControlShow(noteLabel);
     display.refreshControl(noteLabel);

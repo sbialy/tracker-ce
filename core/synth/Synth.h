@@ -8,6 +8,9 @@
 #include "PolyUtil/misc.h"
 
 #include "mtStructs.h"
+#ifdef FEATURE_SYNTH_OPEN
+#include "open_load.h"
+#endif
 #include <array>
 #include <cassert>
 #include <memory>
@@ -110,8 +113,19 @@ class Synth
     int getMaxVoiceCount(int part);
     void setInstrumentType(int part, polysynth::InstrumentTypeId typeId);
 #ifdef FEATURE_SYNTH_OPEN
-    // Patch change FX: the bank holds the values of the first patches of the part's engine (Patches/<ENGINE>/).
-    // reloadPatchBank is main thread only, applyPatchBankSlot runs in the audio callback and only copies floats.
+    // Patch slots (SYNTH_OPEN): a part has kPatchSlots patches in the project, slot 0 is <P>.patch (stock opens it), slot n is
+    // <P>-n.patch. The live patch is the slot that is open in the editor, the Patch step FX copies another slot's values over it.
+    // Everything here is main thread only except applyPatchBankSlot (audio callback, copies floats, no shared_ptr).
+    static constexpr int kPatchSlots = polysynth::open::kPatchBankSlots;
+    int getPatchSlot(int part);
+    // Saves the open slot when it is dirty, then opens `slot` (a slot without a file starts as a copy of the open one)
+    polysynth::open::SlotSelect selectPatchSlot(int part, int slot);
+    // Cancel of the library browser: back to what the open slot was before the browsing
+    void revertCurrentPatch(int part, const std::string& previousName);
+    // If the Patch FX left another slot's values in the part, put the open slot's values back (call before showing or editing)
+    void restorePatchFx(int part) { polysynth::open::patchBankRestore(part); }
+    // Writes the open slot to its Workspace file when it was edited (before the engine of the part changes)
+    void flushPatchSlot(int part);
     void reloadPatchBank(int part);
     bool applyPatchBankSlot(int part, int slot);
 #endif
@@ -147,6 +161,9 @@ class Synth
         std::shared_ptr<polysynth::Patch> patch = nullptr;
         std::string patchName = {};
         bool patchDirty = false;
+#ifdef FEATURE_SYNTH_OPEN
+        std::string slotZeroName = {}; // the project's patch name while another slot is open
+#endif
     };
     std::array<Part, kSynthParts> parts;
     std::shared_ptr<polysynth::Synth> synth;
@@ -157,6 +174,9 @@ class Synth
     FileSystem* filesystem;
 
     void setPatch(int part, std::shared_ptr<polysynth::Patch> patch, std::string name);
+#ifdef FEATURE_SYNTH_OPEN
+    bool loadWorkspacePatch(int part, std::optional<std::string> overrideName);
+#endif
 
     friend class PolySynth;
 };

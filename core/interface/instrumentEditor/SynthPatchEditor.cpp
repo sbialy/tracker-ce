@@ -402,9 +402,14 @@ static void functSynthPatchSaveAsKeyboardConfirm()
     auto result = IE->getSynth()->savePatch(syntPartIdx, IE->keyboardManager.getName());
     mtPopups.show(0, result ? "Patch saved" : "Error saving patch");
 
-    polystrncpy(mtProject.values.synthPart[syntPartIdx].patchName,
-                IE->getSynth()->getPatchName(syntPartIdx).c_str(),
-                sizeof(SynthPartSettings::patchName));
+#ifdef FEATURE_SYNTH_OPEN
+    if (IE->getSynth()->getPatchSlot(syntPartIdx) == 0) // the project stores the name of slot 0 only
+#endif
+    {
+        polystrncpy(mtProject.values.synthPart[syntPartIdx].patchName,
+                    IE->getSynth()->getPatchName(syntPartIdx).c_str(),
+                    sizeof(SynthPartSettings::patchName));
+    }
 
     newFileManager.setProjectStructChanged();
 

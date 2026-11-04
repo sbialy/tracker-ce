@@ -32,16 +32,47 @@ void resetOnProjectLoad();
 // rendering, soft clipping and sending blocks of zeros. False for a part that does not exist.
 bool partIdle(int part);
 
-// Patch change FX. Per part, a bank of the first 16 patches of the part's engine (Patches/<ENGINE>/, alphabetical, as the
-// patch browser lists them), held as plain values (no macros, no OpenPatch). Slots of another engine, a missing slot or a file
-// that does not decode are ignored.
+// Patch slots and the Patch step FX. Per part, 16 slots in the project: slot 0 is <P>.patch (what stock firmware opens),
+// slot n > 0 is <P>-n.patch, both in Workspace/ and in the project folder. The part's live Patch is the slot that is open in
+// the editor (current). The bank holds the plain values (no macros, no OpenPatch) of every slot file of the part's engine,
+// for the FX. A slot file of another engine, a missing file or a damaged one is not in the bank.
 constexpr int kPatchBankSlots = 16;
 constexpr int kPatchBankParts = 3;
-// Main thread (after a patch is loaded, the engine changes or a patch is saved): reads the files and replaces the bank of `part`.
-void patchBankPreload(int part, Patch& patch, PatchStore& store);
-// Audio callback (Sequencer::tick, before the synth renders): copies the values of `slot` into `patch`. False (nothing
-// changed) when the slot is out of range, empty or from another engine. No allocation, no file access, patchDirty untouched.
-bool patchBankApply(int part, int slot, Patch* patch);
+// File name without folder and extension of slot `slot` of `part`: "P" for slot 0, "P-n" otherwise.
+void patchSlotName(int part, int slot, char (&out)[8]);
+
+// Main thread, with audio interrupts DISABLED by the caller, in the same window that replaces the part's live Patch object (the old
+// one may be freed there). The audio callback reads only this pointer (one aligned word), never the shared_ptr the Synth holds.
+void patchBankSetLive(int part, Patch* patch);
+// Main thread: current slot back to 0 and the bank rebuilt from the slot files in `workspace` (project load, engine change).
+void patchBankPreload(int part, Patch& patch, PatchStore& workspace);
+// The open slot of the part in the editor (0 when the bank was never built)
+int patchBankCurrent(int part);
+// Main thread: if the FX replaced the live values, put the edited values of the open slot back (call before reading or
+// saving the live patch, and before any edit).
+void patchBankRestore(int part);
+// Main thread: the live patch was just written to the file of the open slot: the bank follows, the slot now has a file.
+void patchBankCommit(int part);
+
+enum class SlotSelect
+{
+    kSame,        // already the open slot
+    kLoaded,      // the slot file was loaded into the live patch
+    kCopied,      // no file: the live patch stays and becomes the new slot (no file until it is saved)
+    kOtherEngine, // a file of another engine sits there: nothing changed, the slot is not usable with this engine
+    kError,
+};
+// Main thread. Open slot `slot`. The caller saved the open slot first when it was dirty. Macros of the live patch come from
+// the file (kLoaded) or stay (kCopied).
+SlotSelect patchBankSelect(int part, int slot, Patch& patch, PatchStore& workspace);
+// Main thread: cancel of the library browser. Reloads the open slot from its file, or from the slot it was copied from.
+// False when there is nothing to reload.
+bool patchBankRevert(int part, Patch& patch, PatchStore& workspace);
+
+// Audio callback (Sequencer::tick, before the synth renders): the Patch step FX. Copies the values of `slot` into the part's
+// live patch. The slot that is open in the editor puts the edited values back. False (nothing changed) when the slot is out of
+// range or has no file of this engine. No allocation, no file access, no shared_ptr, patchDirty untouched.
+bool patchBankApply(int part, int slot);
 
 // Global synth voice pool shared by all slots: default 4 (OpenTracker 2.2.4), max 8.
 constexpr int kDefaultVoiceBudget = 4;

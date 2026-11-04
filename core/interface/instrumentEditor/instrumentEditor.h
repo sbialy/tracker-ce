@@ -402,6 +402,9 @@ class cInstrumentEditor : public ModuleBase
     void changeSynthReverbSend(int16_t value);
     void changeSynthDelaySend(int16_t value);
     void changeSynthPatchListPos(int16_t value);
+#ifdef FEATURE_SYNTH_OPEN
+    void changeSynthSlot(int16_t value);
+#endif
 
     void setDefaultSynthModel();
     void setDefaultSynthPolyphony();

@@ -177,14 +177,7 @@ bool Synth::savePatch(int part, const char* name)
         parts[part].patchName = name;
     }
 
-    const bool saved = patchStore->savePatch(parts[part].patchName, *parts[part].patch);
-#ifdef FEATURE_SYNTH_OPEN
-    if (saved)
-    {
-        reloadPatchBank(part); // a new or renamed file moves the alphabetical slots
-    }
-#endif
-    return saved;
+    return patchStore->savePatch(parts[part].patchName, *parts[part].patch);
 }
 
 bool Synth::savePatch(int part)
@@ -211,11 +204,32 @@ void Synth::initPatch(int part)
 
 void Synth::savePatchToWorkspace(int part)
 {
+#ifdef FEATURE_SYNTH_OPEN
+    // the open slot's file: <P>.patch for slot 0, <P>-n.patch otherwise. A slot the Patch FX replaced goes back first.
+    polysynth::open::patchBankRestore(part);
+    char name[8];
+    polysynth::open::patchSlotName(part, polysynth::open::patchBankCurrent(part), name);
+    patchStoreWorkspace->savePatch(name, *parts[part].patch);
+    polysynth::open::patchBankCommit(part);
+#else
     patchStoreWorkspace->savePatch(fmt::format("{}", part), *parts[part].patch);
+#endif
     parts[part].patchDirty = false;
 }
 
+#ifdef FEATURE_SYNTH_OPEN
+// Project load: slot 0 (<P>.patch) opens and the bank of the part is read from the Workspace slot files
 bool Synth::loadPatchFromWorkspace(int part, std::optional<std::string> overrideName)
+{
+    const bool fileLoaded = loadWorkspacePatch(part, std::move(overrideName));
+    reloadPatchBank(part);
+    return fileLoaded;
+}
+
+bool Synth::loadWorkspacePatch(int part, std::optional<std::string> overrideName)
+#else
+bool Synth::loadPatchFromWorkspace(int part, std::optional<std::string> overrideName)
+#endif
 {
     bool fileLoaded = true;
     if (overrideName)
@@ -233,9 +247,6 @@ bool Synth::loadPatchFromWorkspace(int part, std::optional<std::string> override
     }
 
     parts[part].patchDirty = false;
-#ifdef FEATURE_SYNTH_OPEN
-    reloadPatchBank(part);
-#endif
     return fileLoaded;
 }
 
@@ -245,16 +256,81 @@ void Synth::reloadPatchBank(int part)
     static_assert(kSynthParts <= polysynth::open::kPatchBankParts, "one patch bank per synth part");
     assert(part < kSynthParts);
 
-    if (parts[part].patch && patchStore)
+    parts[part].slotZeroName.clear();
+    if (parts[part].patch && patchStoreWorkspace)
     {
-        newFileManager.createPatchesFolder();
-        polysynth::open::patchBankPreload(part, *parts[part].patch, *patchStore);
+        polysynth::open::patchBankPreload(part, *parts[part].patch, *patchStoreWorkspace);
     }
 }
 
 bool Synth::applyPatchBankSlot(int part, int slot)
 {
-    return part >= 0 && part < kSynthParts && polysynth::open::patchBankApply(part, slot, parts[part].patch.get());
+    return part >= 0 && part < kSynthParts && polysynth::open::patchBankApply(part, slot);
+}
+
+int Synth::getPatchSlot(int part)
+{
+    return polysynth::open::patchBankCurrent(part);
+}
+
+polysynth::open::SlotSelect Synth::selectPatchSlot(int part, int slot)
+{
+    assert(part >= 0 && part < kSynthParts);
+    using polysynth::open::SlotSelect;
+
+    const int previous = getPatchSlot(part);
+    if (slot == previous)
+    {
+        return SlotSelect::kSame;
+    }
+
+    polysynth::open::patchBankRestore(part);
+    if (parts[part].patchDirty)
+    {
+        savePatchToWorkspace(part); // a dirty slot is written when it is left
+    }
+
+    const SlotSelect result = polysynth::open::patchBankSelect(part, slot, *parts[part].patch, *patchStoreWorkspace);
+    if (result == SlotSelect::kLoaded || result == SlotSelect::kCopied)
+    {
+        // slot 0 keeps the name the project stores, the other slots have no name in the file
+        if (previous == 0)
+        {
+            parts[part].slotZeroName = parts[part].patchName;
+        }
+        if (slot == 0)
+        {
+            parts[part].patchName = parts[part].slotZeroName.empty() ? kInitPatchName : parts[part].slotZeroName;
+        }
+        else if (result == SlotSelect::kLoaded)
+        {
+            parts[part].patchName = "Unnamed";
+        }
+        parts[part].patchDirty = false;
+    }
+    return result;
+}
+
+void Synth::flushPatchSlot(int part)
+{
+    if (parts[part].patchDirty && getPatchSlot(part) > 0)
+    {
+        savePatchToWorkspace(part);
+    }
+}
+
+void Synth::revertCurrentPatch(int part, const std::string& previousName)
+{
+    if (getPatchSlot(part) == 0)
+    {
+        loadWorkspacePatch(part, previousName); // as before: Workspace file, else the library by name, else Init
+    }
+    else
+    {
+        polysynth::open::patchBankRevert(part, *parts[part].patch, *patchStoreWorkspace);
+        parts[part].patchName = previousName;
+        parts[part].patchDirty = false;
+    }
 }
 #endif
 
@@ -315,6 +391,8 @@ void Synth::setInstrumentType(int partIdx, polysynth::InstrumentTypeId typeId)
         part.instrument->assignPatch(part.patch);
         ENABLE_AUDIO_INTERRUPTS();
 #ifdef FEATURE_SYNTH_OPEN
+        // The new engine starts on slot 0 (the Init patch). The slot files 1..15 of the old engine stay on disk and
+        // in the project, they are ignored (and cannot be opened) until the part is switched back to their engine.
         reloadPatchBank(partIdx);
 #endif
     }
@@ -322,7 +400,17 @@ void Synth::setInstrumentType(int partIdx, polysynth::InstrumentTypeId typeId)
 
 void Synth::setPatch(int part, std::shared_ptr<polysynth::Patch> patch, std::string name)
 {
+#ifdef FEATURE_SYNTH_OPEN
+    // The audio callback (Patch FX) never reads parts[].patch: it gets a plain pointer, swapped in the same
+    // audio-interrupt-free window as the shared_ptr.
+    polysynth::Patch* const raw = patch.get();
+    DISABLE_AUDIO_INTERRUPTS();
+    parts[part].patch = std::move(patch); // may free the old patch, the pointer below must not outlive it
+    polysynth::open::patchBankSetLive(part, raw);
+    ENABLE_AUDIO_INTERRUPTS();
+#else
     parts[part].patch = std::move(patch);
+#endif
     parts[part].patchName = std::move(name);
 
     //    updateCCDefaults(part);
@@ -511,11 +599,34 @@ void Synth::copyWorkspacePatches(const char* sourceProjectPath, const char* dest
 {
     for (int part = 0; part < kSynthParts; part++)
     {
+#ifdef FEATURE_SYNTH_OPEN
+        // slot 0 is <P>.patch (all stock firmware knows), slot n > 0 is <P>-n.patch. A slot file the source does not have is
+        // removed from the destination, so a slot never survives from another project.
+        for (int slot = 0; slot < kPatchSlots; slot++)
+        {
+            char name[8];
+            polysynth::open::patchSlotName(part, slot, name);
+            std::string srcFile =
+              fmt::format("{}\\{}{}", sourceProjectPath, name, polysynth::PatchStore::kFileExtension);
+            std::string dstFile =
+              fmt::format("{}\\{}{}", destinationProjectPath, name, polysynth::PatchStore::kFileExtension);
+            if (slot > 0 && !filesystem->exists(srcFile.c_str()))
+            {
+                if (filesystem->exists(dstFile.c_str()))
+                {
+                    filesystem->remove(dstFile.c_str());
+                }
+                continue;
+            }
+            cFileTransfer::copyFile(filesystem, srcFile.c_str(), dstFile.c_str());
+        }
+#else
         std::string srcFile =
           fmt::format("{}\\{}{}", sourceProjectPath, part, polysynth::PatchStore::kFileExtension);
         std::string dstFile = fmt::format(
           "{}\\{}{}", destinationProjectPath, part, polysynth::PatchStore::kFileExtension);
         cFileTransfer::copyFile(filesystem, srcFile.c_str(), dstFile.c_str());
+#endif
     }
 }
 

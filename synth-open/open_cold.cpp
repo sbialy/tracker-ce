@@ -604,7 +604,7 @@ class OpenPatchStore final : public PatchStore
         }
         auto buf = std::make_unique<uint8_t[]>(kPatchFileMax + 1);
         auto data = std::make_unique<PatchData>();
-        if (!readPatchFile(def, op.typeId(), name, buf.get(), *data))
+        if (readPatchFile(def, op.typeId(), name, buf.get(), *data) != FileRead::kOk)
         {
             return false;
         }
@@ -654,18 +654,23 @@ class OpenPatchStore final : public PatchStore
     {
         return std::nullopt;
     }
-    // Reads and decodes one file of the engine `typeId` (buf holds kPatchFileMax + 1 bytes, out is fresh). False for a
-    // missing, damaged or foreign file.
-    bool readPatchFile(const EngineDef* def, int typeId, const std::string& name, uint8_t* buf, PatchData& out)
+    // Reads and decodes one file of the engine `typeId` (buf holds kPatchFileMax + 1 bytes, out is fresh).
+    enum class FileRead
+    {
+        kOk,
+        kMissing, // no such file
+        kOther,   // there, but damaged or of another engine
+    };
+    FileRead readPatchFile(const EngineDef* def, int typeId, const std::string& name, uint8_t* buf, PatchData& out)
     {
         if (!fs)
         {
-            return false;
+            return FileRead::kMissing;
         }
         auto h = fs->open(pathFor(def, name), FileSystem::OpenOptions::kNone);
         if (!h)
         {
-            return false;
+            return FileRead::kMissing;
         }
         size_t n = 0, got;
         while (n <= kPatchFileMax && (got = fs->read(*h, std::span<uint8_t>(buf + n, kPatchFileMax + 1 - n))) > 0)
@@ -673,7 +678,7 @@ class OpenPatchStore final : public PatchStore
             n += got;
         }
         fs->close(*h);
-        return decodePatch(buf, n, out) && typeForEngineId(out.engine) == typeId;
+        return decodePatch(buf, n, out) && typeForEngineId(out.engine) == typeId ? FileRead::kOk : FileRead::kOther;
     }
 
   private:
@@ -696,9 +701,10 @@ std::unique_ptr<PatchStore> makePatchStore(const InstrumentTypeRegistry& registr
     return std::make_unique<OpenPatchStore>(registry, fs, typeFolders);
 }
 
-// ------------------------------------------------------------- patch bank (patch change FX)
-// Per part: the values (floats only, no macros) of the first kPatchBankSlots patches of the part's engine, alphabetical as
-// the patch browser lists them. Built in the main thread, applied by a copy in the audio callback.
+// ------------------------------------------------------------- patch slots and bank (Patch step FX)
+// Per part: the values (floats only, no macros) of every slot file of the part's engine. Built in the main thread, applied by
+// a copy in the audio callback. The audio callback reads gLive (a plain pointer, one aligned word) and gBank, and the main
+// thread changes gBank only with the audio interrupt disabled.
 
 namespace
 {
@@ -706,20 +712,49 @@ struct PartBank
 {
     int typeId = -1;
     int nParams = 0;
-    uint16_t valid = 0;  // bit n: slot n holds a patch of this engine
-    float* vals = nullptr; // kPatchBankSlots * nParams, null when the library is empty
+    uint16_t valid = 0;    // bit n: slot n has a file of this engine (kSlot... rows of vals)
+    uint8_t cur = 0;       // the slot open in the editor: the live patch holds its values
+    int8_t from = -1;      // cur has no file yet: it began as a copy of this slot (-1: it has a file)
+    bool applied = false;  // the FX replaced the live values, the edited ones wait in the last row of vals
+    float* vals = nullptr; // (kPatchBankSlots + 1) * nParams: slot rows, then the shadow row
 };
 PartBank gBank[kPatchBankParts];
+OpenPatch* volatile gLive[kPatchBankParts];
+
+bool partOk(int part)
+{
+    return part >= 0 && part < kPatchBankParts;
+}
 } // namespace
 
-void patchBankPreload(int part, Patch& patch, PatchStore& store)
+void patchSlotName(int part, int slot, char (&out)[8])
 {
-    if (part < 0 || part >= kPatchBankParts)
+    if (slot > 0)
+    {
+        snprintf(out, sizeof(out), "%d-%d", part, slot);
+    }
+    else
+    {
+        snprintf(out, sizeof(out), "%d", part);
+    }
+}
+
+void patchBankSetLive(int part, Patch* patch)
+{
+    if (partOk(part))
+    {
+        gLive[part] = static_cast<OpenPatch*>(patch);
+    }
+}
+
+void patchBankPreload(int part, Patch& patch, PatchStore& workspace)
+{
+    if (!partOk(part))
     {
         return;
     }
     OpenPatch& op = static_cast<OpenPatch&>(patch);
-    OpenPatchStore& st = static_cast<OpenPatchStore&>(store);
+    OpenPatchStore& st = static_cast<OpenPatchStore&>(workspace);
     const EngineDef* def = op.getDef();
     const int n = op.paramCount();
     PartBank nb;
@@ -727,24 +762,21 @@ void patchBankPreload(int part, Patch& patch, PatchStore& store)
     nb.nParams = n;
     if (def && n > 0)
     {
-        const auto names = st.listPatchesByType(nb.typeId); // views into the file system's list buffer, no listing below
-        const int cnt = std::min<int>(int(names.size()), kPatchBankSlots);
-        if (cnt > 0)
+        nb.vals = new (std::nothrow) float[size_t(kPatchBankSlots + 1) * size_t(n)];
+    }
+    if (nb.vals)
+    {
+        auto buf = std::make_unique<uint8_t[]>(kPatchFileMax + 1);
+        auto data = std::make_unique<PatchData>();
+        for (int i = 0; i < kPatchBankSlots; i++)
         {
-            nb.vals = new (std::nothrow) float[size_t(kPatchBankSlots) * size_t(n)];
-        }
-        if (nb.vals)
-        {
-            auto buf = std::make_unique<uint8_t[]>(kPatchFileMax + 1);
-            auto data = std::make_unique<PatchData>();
-            for (int i = 0; i < cnt; i++)
+            char name[8];
+            patchSlotName(part, i, name);
+            *data = PatchData();
+            if (st.readPatchFile(def, nb.typeId, name, buf.get(), *data) == OpenPatchStore::FileRead::kOk)
             {
-                *data = PatchData();
-                if (st.readPatchFile(def, nb.typeId, std::string(names[i]), buf.get(), *data))
-                {
-                    op.valuesFromData(*data, nb.vals + size_t(i) * size_t(n));
-                    nb.valid |= uint16_t(1u << i);
-                }
+                op.valuesFromData(*data, nb.vals + size_t(i) * size_t(n));
+                nb.valid |= uint16_t(1u << i);
             }
         }
     }
@@ -754,19 +786,159 @@ void patchBankPreload(int part, Patch& patch, PatchStore& store)
     delete[] nb.vals; // the previous bank
 }
 
-bool patchBankApply(int part, int slot, Patch* patch)
+int patchBankCurrent(int part)
 {
-    if (!patch || part < 0 || part >= kPatchBankParts || slot < 0 || slot >= kPatchBankSlots)
+    return partOk(part) ? gBank[part].cur : 0;
+}
+
+namespace
+{
+// Bank usable with the live patch of the part (same engine and size). Main thread or audio callback.
+inline bool bankMatches(const PartBank& b, const OpenPatch* p)
+{
+    return p && b.vals && b.typeId == p->typeId() && b.nParams == p->paramCount();
+}
+} // namespace
+
+void patchBankRestore(int part)
+{
+    if (!partOk(part))
+    {
+        return;
+    }
+    OPEN_LOCK_AUDIO();
+    PartBank& b = gBank[part];
+    OpenPatch* p = gLive[part];
+    if (b.applied && bankMatches(b, p))
+    {
+        p->setValuesRaw(b.vals + size_t(kPatchBankSlots) * size_t(b.nParams));
+    }
+    b.applied = false;
+    OPEN_UNLOCK_AUDIO();
+}
+
+void patchBankCommit(int part)
+{
+    if (!partOk(part))
+    {
+        return;
+    }
+    OPEN_LOCK_AUDIO();
+    PartBank& b = gBank[part];
+    OpenPatch* p = gLive[part];
+    if (bankMatches(b, p) && !b.applied)
+    {
+        p->getValuesRaw(b.vals + size_t(b.cur) * size_t(b.nParams));
+        b.valid |= uint16_t(1u << b.cur);
+        b.from = -1;
+    }
+    OPEN_UNLOCK_AUDIO();
+}
+
+SlotSelect patchBankSelect(int part, int slot, Patch& patch, PatchStore& workspace)
+{
+    if (!partOk(part) || slot < 0 || slot >= kPatchBankSlots)
+    {
+        return SlotSelect::kError;
+    }
+    PartBank& b = gBank[part];
+    if (slot == b.cur)
+    {
+        return SlotSelect::kSame;
+    }
+    patchBankRestore(part);
+    OpenPatch& op = static_cast<OpenPatch&>(patch);
+    OpenPatchStore& st = static_cast<OpenPatchStore&>(workspace);
+    const EngineDef* def = op.getDef();
+    if (!def)
+    {
+        return SlotSelect::kError;
+    }
+    char name[8];
+    patchSlotName(part, slot, name);
+    auto buf = std::make_unique<uint8_t[]>(kPatchFileMax + 1);
+    auto data = std::make_unique<PatchData>();
+    const auto state = st.readPatchFile(def, op.typeId(), name, buf.get(), *data);
+    if (state == OpenPatchStore::FileRead::kOther)
+    {
+        return SlotSelect::kOtherEngine;
+    }
+    const int8_t origin = b.from >= 0 ? b.from : int8_t(b.cur); // the file a pending copy began from
+    if (state == OpenPatchStore::FileRead::kOk)
+    {
+        OPEN_LOCK_AUDIO();
+        op.importData(*data);
+        OPEN_UNLOCK_AUDIO();
+    }
+    OPEN_LOCK_AUDIO();
+    b.cur = uint8_t(slot);
+    b.from = state == OpenPatchStore::FileRead::kOk ? int8_t(-1) : origin;
+    OPEN_UNLOCK_AUDIO();
+    return state == OpenPatchStore::FileRead::kOk ? SlotSelect::kLoaded : SlotSelect::kCopied;
+}
+
+bool patchBankRevert(int part, Patch& patch, PatchStore& workspace)
+{
+    if (!partOk(part))
     {
         return false;
     }
-    const PartBank& b = gBank[part];
-    OpenPatch& op = *static_cast<OpenPatch*>(patch);
-    if (!b.vals || !(b.valid & (1u << slot)) || b.typeId != op.typeId() || b.nParams != op.paramCount())
+    PartBank& b = gBank[part];
+    patchBankRestore(part);
+    OpenPatch& op = static_cast<OpenPatch&>(patch);
+    OpenPatchStore& st = static_cast<OpenPatchStore&>(workspace);
+    const EngineDef* def = op.getDef();
+    if (!def)
     {
         return false;
     }
-    op.setValuesRaw(b.vals + size_t(slot) * size_t(b.nParams));
+    char name[8];
+    patchSlotName(part, b.from >= 0 ? b.from : b.cur, name);
+    auto buf = std::make_unique<uint8_t[]>(kPatchFileMax + 1);
+    auto data = std::make_unique<PatchData>();
+    if (st.readPatchFile(def, op.typeId(), name, buf.get(), *data) != OpenPatchStore::FileRead::kOk)
+    {
+        return false;
+    }
+    OPEN_LOCK_AUDIO();
+    op.importData(*data);
+    OPEN_UNLOCK_AUDIO();
+    return true;
+}
+
+bool patchBankApply(int part, int slot)
+{
+    if (!partOk(part) || slot < 0 || slot >= kPatchBankSlots)
+    {
+        return false;
+    }
+    PartBank& b = gBank[part];
+    OpenPatch* p = gLive[part];
+    if (!bankMatches(b, p))
+    {
+        return false;
+    }
+    const size_t n = size_t(b.nParams);
+    float* shadow = b.vals + size_t(kPatchBankSlots) * n;
+    if (slot == b.cur)
+    {
+        if (b.applied)
+        {
+            p->setValuesRaw(shadow); // back to the edited values of the open slot
+            b.applied = false;
+        }
+        return true;
+    }
+    if (!(b.valid & (1u << slot)))
+    {
+        return false;
+    }
+    if (!b.applied)
+    {
+        p->getValuesRaw(shadow); // keep the edited values of the open slot
+        b.applied = true;
+    }
+    p->setValuesRaw(b.vals + size_t(slot) * n);
     return true;
 }
 

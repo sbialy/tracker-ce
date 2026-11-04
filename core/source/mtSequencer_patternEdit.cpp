@@ -189,6 +189,9 @@ uint8_t Sequencer::generateRandomFx()
     {
         retVal = utilMathRandom::random(fx.FX_TYPE_OFF + 1, FX_COUNT - FX_COUNT_HIDDEN_FXes + 1);
         if (retVal != fx.FX_TYPE_TEMPO && retVal != fx.FX_TYPE_BREAK_PATTERN // breaka nie chcemy
+#ifdef FEATURE_SYNTH_OPEN
+            && retVal != fx.FX_TYPE_PATCH_CHANGE // a random patch switch is never wanted from the picker
+#endif
         )
             break;
     }

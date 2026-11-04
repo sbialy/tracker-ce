@@ -40,9 +40,10 @@ class OpenPatch final : public Patch
     void exportData(PatchData& d) const;
     void importData(const PatchData& d);
     // Patch bank (patch change FX): the values of a decoded file, same range rules as importData, into out[paramCount()]
-    // (cold). setValuesRaw is the whole change on the audio callback: floats only, macros and extras stay.
+    // (cold). setValuesRaw / getValuesRaw are the whole change on the audio callback: floats only, macros and extras stay.
     void valuesFromData(const PatchData& d, float* out) const;
     void setValuesRaw(const float* v) { std::memcpy(values, v, size_t(count) * sizeof(float)); }
+    void getValuesRaw(float* out) const { std::memcpy(out, values, size_t(count) * sizeof(float)); }
     int typeId() const { return metadata.instrumentTypeId; }
 
     // Shim internal: macro CC (0..127) written by the instrument from MIDI

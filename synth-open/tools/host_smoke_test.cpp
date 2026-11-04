@@ -314,50 +314,116 @@ int main() {
     check(ws->savePatch("0", *w0) && mw->files.count("0.patch") == 1, "workspace store writes Workspace/0.patch (no type folder)");
     auto w1 = ws->createPatch(kLead);
     check(ws->loadPatch("0", *w1, true) && *w1->getParamValue(0) == w0v, "project reload: the edited value comes back from Workspace/0.patch");
-    // ---- patch change FX: a bank of the first patches of the engine, applied as a plain copy of the values
+    // ---- patch slots and the Patch step FX: <P>.patch is slot 0 (stock opens it), <P>-n.patch is slot n, all in the project
     {
-      auto sB = Synth::createSynth([](size_t){return nullptr;});
-      auto fsB = std::make_unique<MemFS>(); MemFS* mb = fsB.get();
-      sB->addFileSystem(Synth::FileSystemId::kPatches, std::move(fsB));
-      auto pb = sB->createPatchStore(Synth::FileSystemId::kPatches, true);
-      auto sE = Synth::createSynth([](size_t){return nullptr;});   // a library with no patch at all
-      sE->addFileSystem(Synth::FileSystemId::kPatches, std::make_unique<MemFS>());
-      auto pe = sE->createPatchStore(Synth::FileSystemId::kPatches, true);
+      mw->files.clear();   // a clean Workspace
       auto sameValues = [](Patch& a, Patch& b) { const size_t n = a.getMetadata().params.size(); bool same = n == b.getMetadata().params.size();
         for (size_t i = 0; i < n && same; i++) same = *a.getParamValue(int(i)) == *b.getParamValue(int(i)); return same; };
-      bool switches = true, keepsMacros = true, ignoresBad = true, ignoresForeign = true, emptyIgnored = true, changed = true;
+      auto fill = [](Patch& p, float t) { const auto& m = p.getMetadata();
+        for (size_t i = 0; i < m.params.size(); i++) { const float a = float(m.params[i].minValue), b = float(m.params[i].maxValue); p.setParamValue(int(i), a + (b - a) * t, Patch::ParamChangeSource::kKnob); } };
+      auto nameOf = [](int part, int slot) { char n[8]; open::patchSlotName(part, slot, n); return std::string(n); };
+      bool names = true, fx = true, back = true, keepsMacros = true, bad = true, missing = true, sel = true, pend = true, edits = true,
+           revert = true, engineKeeps = true, engineBack = true, changed = true;
+      names = nameOf(0, 0) == "0" && nameOf(1, 0) == "1" && nameOf(0, 1) == "0-1" && nameOf(2, 15) == "2-15";
       int part = 0;
       for (const auto& k : kinds) {
-        auto lo = pb->createPatch(int(k.id)), hi = pb->createPatch(int(k.id)); const auto& m = lo->getMetadata();
-        for (size_t i = 0; i < m.params.size(); i++) { const float a = float(m.params[i].minValue), b = float(m.params[i].maxValue);
-          lo->setParamValue(int(i), a + (b - a) * 0.1f, Patch::ParamChangeSource::kKnob); hi->setParamValue(int(i), a + (b - a) * 0.9f, Patch::ParamChangeSource::kKnob); }
-        pb->savePatch("b_low", *lo); pb->savePatch("b_high", *hi);   // alphabetical: slot 0 = b_high, slot 1 = b_low
-        auto rHi = pb->createPatch(int(k.id)), rLo = pb->createPatch(int(k.id));   // what the patch browser loads
-        pb->loadPatch("b_high", *rHi, true); pb->loadPatch("b_low", *rLo, true);
-        auto part0 = pb->createPatch(int(k.id)); part0->setMacroDisplayName(0, "Keep");
-        const bool differs = !sameValues(*part0, *rHi) && !sameValues(*rHi, *rLo);
-        changed = changed && differs;
         const int myPart = part++ % open::kPatchBankParts;
-        open::patchBankPreload(myPart, *part0, *pb);
-        switches = switches && open::patchBankApply(myPart, 0, part0.get()) && sameValues(*part0, *rHi);
-        switches = switches && open::patchBankApply(myPart, 1, part0.get()) && sameValues(*part0, *rLo);
-        keepsMacros = keepsMacros && part0->getMetadata().macros[0].displayName == "Keep";
-        for (int bad : {2, 15, 16, 99, -1}) ignoresBad = ignoresBad && !open::patchBankApply(myPart, bad, part0.get()) && sameValues(*part0, *rLo);
+        auto base = ws->createPatch(int(k.id)), lo = ws->createPatch(int(k.id)), hi = ws->createPatch(int(k.id));
+        fill(*base, 0.5f); fill(*lo, 0.1f); fill(*hi, 0.9f);
+        // slot 0 = base, slot 1 = lo, slot 3 = hi, slot 2 has no file
+        ws->savePatch(nameOf(myPart, 0), *base); ws->savePatch(nameOf(myPart, 1), *lo); ws->savePatch(nameOf(myPart, 3), *hi);
+        const bool files = mw->files.count(nameOf(myPart, 0) + ".patch") && mw->files.count(nameOf(myPart, 1) + ".patch") &&
+                           mw->files.count(nameOf(myPart, 3) + ".patch") && !mw->files.count(nameOf(myPart, 2) + ".patch");
+        names = names && files;
+        auto live = ws->createPatch(int(k.id));
+        ws->loadPatch(nameOf(myPart, 0), *live, true); live->setMacroDisplayName(0, "Keep");   // not in any slot file
+        changed = changed && !sameValues(*base, *lo) && !sameValues(*lo, *hi) && !sameValues(*base, *hi);
+        open::patchBankSetLive(myPart, live.get());
+        open::patchBankPreload(myPart, *live, *ws);
+        // the FX: slot n copies the values of <P>-n.patch over the live patch, slot 0 (the open one) brings the edited values back
+        fx = fx && open::patchBankApply(myPart, 1) && sameValues(*live, *lo);
+        fx = fx && open::patchBankApply(myPart, 3) && sameValues(*live, *hi);
+        fx = fx && open::patchBankApply(myPart, 0) && sameValues(*live, *base);
+        keepsMacros = keepsMacros && live->getMetadata().macros[0].displayName == "Keep";
+        // a slot with no file and slots out of range are ignored, the values stay
+        open::patchBankApply(myPart, 1);
+        for (int ign : {2, 4, 15, 16, 99, -1}) missing = missing && !open::patchBankApply(myPart, ign) && sameValues(*live, *lo);
+        // edited, unsaved values of the open slot survive an FX round trip and a restore
+        open::patchBankRestore(myPart);
+        live->setParamValue(0, float(live->getMetadata().params[0].maxValue), Patch::ParamChangeSource::kKnob);
+        auto edited = ws->createPatch(int(k.id)); ws->savePatch("edited", *live); ws->loadPatch("edited", *edited, true);
+        open::patchBankApply(myPart, 3);
+        back = back && sameValues(*live, *hi);
+        open::patchBankRestore(myPart);
+        back = back && sameValues(*live, *edited);
+        open::patchBankApply(myPart, 3); open::patchBankApply(myPart, 0);
+        back = back && sameValues(*live, *edited);
+        mw->files.erase("edited.patch");
+        ws->loadPatch(nameOf(myPart, 0), *live, true);   // back to the saved slot 0
+        // the editor: open slot 1 (file), slot 2 (no file: a copy of the open one, nothing is written), slot 3 again
+        sel = sel && open::patchBankCurrent(myPart) == 0 && open::patchBankSelect(myPart, 0, *live, *ws) == open::SlotSelect::kSame;
+        sel = sel && open::patchBankSelect(myPart, 1, *live, *ws) == open::SlotSelect::kLoaded && sameValues(*live, *lo) && open::patchBankCurrent(myPart) == 1;
+        sel = sel && open::patchBankSelect(myPart, 2, *live, *ws) == open::SlotSelect::kCopied && sameValues(*live, *lo) && open::patchBankCurrent(myPart) == 2;
+        pend = pend && !mw->files.count(nameOf(myPart, 2) + ".patch");   // opening an empty slot writes no file
+        pend = pend && !open::patchBankApply(myPart, 4) ;               // and the bank does not have it either
+        // library preview over the pending copy, then Cancel: back to the slot it began from (slot 1)
+        fill(*live, 0.3f);
+        revert = revert && open::patchBankRevert(myPart, *live, *ws) && sameValues(*live, *lo);
+        // a pending copy passed on: slot 4 is still a copy of slot 1
+        revert = revert && open::patchBankSelect(myPart, 4, *live, *ws) == open::SlotSelect::kCopied;
+        fill(*live, 0.3f);
+        revert = revert && open::patchBankRevert(myPart, *live, *ws) && sameValues(*live, *lo);
+        // the user edits slot 4 and the project saves it: the file <P>-4.patch appears and the FX can use it
+        fill(*live, 0.7f);
+        auto seven = ws->createPatch(int(k.id)); fill(*seven, 0.7f);
+        ws->savePatch(nameOf(myPart, 4), *live); open::patchBankCommit(myPart);
+        edits = edits && mw->files.count(nameOf(myPart, 4) + ".patch") == 1;
+        edits = edits && open::patchBankSelect(myPart, 3, *live, *ws) == open::SlotSelect::kLoaded && sameValues(*live, *hi);
+        edits = edits && open::patchBankApply(myPart, 4) && sameValues(*live, *seven) && open::patchBankApply(myPart, 3) && sameValues(*live, *hi);
+        edits = edits && open::patchBankSelect(myPart, 0, *live, *ws) == open::SlotSelect::kLoaded && sameValues(*live, *base);
+        // project reload: a fresh bank from the files gives the same slots and the editor is on slot 0 again
+        open::patchBankPreload(myPart, *live, *ws);
+        edits = edits && open::patchBankCurrent(myPart) == 0 && open::patchBankApply(myPart, 4) && sameValues(*live, *seven) && open::patchBankApply(myPart, 0);
+        // engine change: the files of the old engine stay but are ignored by the new engine
         if (nKinds > 1) {
           const auto& other = kinds[(&k == &kinds[0]) ? 1 : 0];
-          auto foreign = pb->createPatch(int(other.id));
-          ignoresForeign = ignoresForeign && !open::patchBankApply(myPart, 0, foreign.get()) && !open::patchBankApply(myPart, 1, foreign.get());
+          auto fresh = ws->createPatch(int(other.id));            // the Init patch of the new engine
+          const size_t before = mw->files.size();
+          open::patchBankSetLive(myPart, fresh.get());
+          open::patchBankPreload(myPart, *fresh, *ws);            // what Synth::setInstrumentType does
+          bool ignored = true;
+          for (int sl = 0; sl < 16; sl++) ignored = ignored && !open::patchBankApply(myPart, sl == 0 ? 1 : sl);
+          engineKeeps = engineKeeps && ignored && open::patchBankCurrent(myPart) == 0 && mw->files.size() == before;   // no file lost
+          engineKeeps = engineKeeps && open::patchBankSelect(myPart, 1, *fresh, *ws) == open::SlotSelect::kOtherEngine && open::patchBankCurrent(myPart) == 1 - 1;
+          engineKeeps = engineKeeps && open::patchBankSelect(myPart, 9, *fresh, *ws) == open::SlotSelect::kCopied;   // a free slot still opens
+          // the part gets the first engine back: slot 0 is a new Init patch (as stock does), slots 1..15 come back
+          auto init = ws->createPatch(int(k.id));
+          ws->savePatch(nameOf(myPart, 0), *init);
+          open::patchBankSetLive(myPart, live.get());
+          open::patchBankPreload(myPart, *live, *ws);
+          engineBack = engineBack && open::patchBankApply(myPart, 1) && sameValues(*live, *lo) && open::patchBankApply(myPart, 3) && sameValues(*live, *hi) && open::patchBankApply(myPart, 4) && sameValues(*live, *seven);
         }
-        auto bare = pe->createPatch(int(k.id)); open::patchBankPreload(myPart, *bare, *pe);   // the part now has no library
-        emptyIgnored = emptyIgnored && !open::patchBankApply(myPart, 0, bare.get());
-        mb->files.erase(std::string(k.name) + "/b_low.patch"); mb->files.erase(std::string(k.name) + "/b_high.patch");
+        // a foreign file at a slot: the editor refuses it, the FX never uses it (engine of the file is not the part's)
+        if (nKinds > 1) {
+          auto foreign = ws->createPatch(int((&k == &kinds[0]) ? kinds[1].id : kinds[0].id)); ws->savePatch(nameOf(myPart, 6), *foreign);
+          open::patchBankPreload(myPart, *live, *ws);
+          sel = sel && !open::patchBankApply(myPart, 6) && open::patchBankSelect(myPart, 6, *live, *ws) == open::SlotSelect::kOtherEngine;
+        }
+        open::patchBankSetLive(myPart, nullptr);
+        for (int sl = 0; sl < 16; sl++) mw->files.erase(nameOf(myPart, sl) + ".patch");
       }
-      check(changed, "bank test patches differ from each other and from the Init patch (all engines of this build)");
-      check(switches, "patch change FX: slot 0 and slot 1 switch the values to the 2nd and 1st alphabetical patch (all engines)");
-      check(keepsMacros, "patch change FX leaves the macros of the part alone");
-      check(ignoresBad, "patch change FX: empty or out of range slots (2, 15, 16, 99, -1) are ignored, values stay");
-      check(ignoresForeign, "patch change FX: a part of another engine than the bank is ignored");
-      check(emptyIgnored, "patch change FX: a part with no patches in its library ignores every slot");
+      check(changed, "slot test patches differ from each other (all engines of this build)");
+      check(names, "slot files: slot 0 is <P>.patch, slot n is <P>-n.patch (0-1, 2-15), only slots that were saved exist");
+      check(fx, "Patch FX: value n copies slot n's file over the live patch, the open slot (0) brings the saved values back (all engines)");
+      check(keepsMacros, "Patch FX leaves the macros of the part alone");
+      check(missing, "Patch FX: a slot with no file and values 4, 15, 16, 99, -1 are ignored, the values stay");
+      check(back, "Patch FX: edited, unsaved values of the open slot come back after the FX (restore or slot = open slot)");
+      check(sel, "editor slot select: loads a slot file, an empty slot starts as a copy of the open one, a foreign file is refused");
+      check(pend, "an empty slot opened in the editor writes no file and is not in the FX bank until it is saved");
+      check(revert, "Cancel in the library browser reloads the open slot (a pending copy: the slot it began from)");
+      check(edits, "a saved slot reaches the bank and the files, a project reload rebuilds the same bank on slot 0");
+      check(nKinds < 2 || engineKeeps, "engine change: old slot files stay, are ignored and cannot be opened, empty slots still open");
+      check(nKinds < 2 || engineBack, "engine change: switching back brings slots 1..15 of that engine back, slot 0 is the new Init");
     }
 #ifdef OT_ORACLE
     // OpenTracker's own codec as oracle: its Init patches load here and our files decode and re-encode there byte for byte

@@ -35,6 +35,13 @@ static const uint16_t framesPlacesCC[2][4] = {
     { (800 / 8) * 4 + 1, 80, (800 / 8) * 3 - 3, 342 },
 };
 
+#ifdef FEATURE_SYNTH_OPEN
+// the patch panel on the right of the Synth screen (Slot / patch name), the 7th place
+static const uint16_t framesPlacesSynthSlot[1][4] = {
+    { (800 / 8) * 6 + 1, 31, (800 / 8) * 2 - 3, 391 },
+};
+#endif
+
 static const uint16_t framesPlacesSynthEdit[1][4] = {
     { (800 / 8) * 4 + 1, 31, (800 / 8) * 3 - 3, 391 },
 };
@@ -1806,7 +1813,11 @@ void cInstrumentEditor::refreshFramePosition()
         }
         case mtInstEditModeSynth:
         {
+#ifdef FEATURE_SYNTH_OPEN
+            frameData.placesCount = 7;
+#else
             frameData.placesCount = 6;
+#endif
             frameData.startPlace = 0;
             frameData.places[0] = &framesPlaces[0][0];
             frameData.places[1] = &framesPlaces[1][0];
@@ -1814,6 +1825,9 @@ void cInstrumentEditor::refreshFramePosition()
             frameData.places[3] = &framesPlaces[3][0];
             frameData.places[4] = &framesPlaces[4][0];
             frameData.places[5] = &framesPlaces[5][0];
+#ifdef FEATURE_SYNTH_OPEN
+            frameData.places[6] = &framesPlacesSynthSlot[0][0];
+#endif
             break;
         }
         case mtInstEditModeSynthPatchEdit:
