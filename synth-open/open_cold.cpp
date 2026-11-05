@@ -6,6 +6,7 @@
 // engine interface (synth-open/ot). Nothing here is derived from libPolySynth/libPolyDSP.
 #include "open_patch.h"
 #include "open_load.h"
+#include "open_fileops.h"
 
 #include "PolySynth/PatchStore.h"
 #include "PolySynth/sdk/InstrumentType.h"
@@ -545,6 +546,50 @@ void OpenPatch::exportData(PatchData& d) const
     d.extra = extra;
 }
 
+// The data of a new patch of the engine, as exportData of a fresh OpenPatch gives it (the smoke test compares both for every engine) but
+// from the engine definition alone: no metadata, no allocation. `d` is fresh.
+void open::initPatchData(const EngineDef& def, PatchData& d)
+{
+    d.engine = engineIdForType(def.typeId);
+    d.nParams = std::min(def.paramCount, kMaxParams);
+    for (int i = 0; i < d.nParams; i++)
+    {
+        const ParamDef& p = def.params[i];
+        d.values[i] = p.min == p.max ? NAN : p.def; // unused slot: absent
+    }
+    d.nMacros = kPatchMacros;
+    for (int m = 0; m < kPatchMacros; m++)
+    {
+        PatchMacroData& dst = d.macros[m];
+        if (m < def.macroCount && m < int(kUserMacroCount))
+        {
+            const MacroDef& src = def.macros[m];
+            std::strncpy(dst.name, src.name, kMacroNameMax);
+            dst.bipolar = src.bipolar;
+            for (int t = 0; t < src.count && t < kMacroTargets; t++)
+            {
+                dst.param[t] = int16_t(src.targets[t].param);
+                dst.amount[t] = src.targets[t].amount;
+                dst.count++;
+            }
+        }
+        else if (m == kVelocityMacro)
+        {
+            std::strncpy(dst.name, "Velocity", kMacroNameMax);
+            if (def.volumeParam >= 0)
+            {
+                dst.param[0] = int16_t(def.volumeParam);
+                dst.amount[0] = 1.0f;
+                dst.count = 1;
+            }
+        }
+        else if (m == kVelocityMacro + 1)
+        {
+            std::strncpy(dst.name, "Pressure", kMacroNameMax);
+        }
+    }
+}
+
 void OpenPatch::valuesFromData(const PatchData& d, float* out) const
 {
     for (int i = 0; i < count; i++)
@@ -790,10 +835,11 @@ class OpenPatchStore final : public PatchStore
         {
             return FileRead::kMissing;
         }
-        auto h = fs->open(pathFor(def, name), FileSystem::OpenOptions::kNone);
+        bool openError = false;
+        auto h = openRead(pathFor(def, name), openError);
         if (!h)
         {
-            return FileRead::kMissing;
+            return openError ? FileRead::kError : FileRead::kMissing;
         }
         size_t n = 0;
         int32_t got = 1;
@@ -809,16 +855,22 @@ class OpenPatchStore final : public PatchStore
         return decodePatch(buf, n, out) && typeForEngineId(out.engine) == typeId ? FileRead::kOk : FileRead::kOther;
     }
     // A whole small file by its full name (with extension) from the store's folder, at most `cap` bytes. 0 when missing or empty.
-    // `ioError` (if given) says the card failed while it was read: the bytes returned are then not the file.
+    // `ioError` (if given) says the card failed: it could not be read, or the file may be there and could not be opened. The bytes
+    // returned are then not the file. 0 without ioError: the file is not there (confirmed by the card).
     size_t readRaw(const std::string& file, uint8_t* buf, size_t cap, bool* ioError = nullptr)
     {
         if (ioError)
         {
             *ioError = false;
         }
-        auto h = fs ? fs->open(file, FileSystem::OpenOptions::kNone) : std::nullopt;
+        bool openError = false;
+        auto h = fs ? openRead(file, openError) : std::nullopt;
         if (!h)
         {
+            if (ioError)
+            {
+                *ioError = openError;
+            }
             return 0;
         }
         size_t n = 0;
@@ -868,6 +920,36 @@ class OpenPatchStore final : public PatchStore
     }
 
   private:
+    // Opens a file for reading. No handle and openError false: the card says the file is not there (and no interrupted replace left its
+    // old version at <file>.bak, which is moved back first). openError: it may be there and could not be opened, or the card failed.
+    std::optional<FileSystem::FileHandle> openRead(const std::string& path, bool& openError)
+    {
+        openError = false;
+        auto h = fs->open(path, FileSystem::OpenOptions::kNone);
+        if (h)
+        {
+            return h;
+        }
+        FsOps ops{ fs };
+        switch (recoverBackupOps(ops, path.c_str()))
+        {
+            case Presence::kAbsent: return std::nullopt;
+            case Presence::kPresent: break; // there now (moved back from <path>.bak) or the first open failed on something else
+            default: openError = true; return std::nullopt;
+        }
+        h = fs->open(path, FileSystem::OpenOptions::kNone);
+        openError = !h;
+        return h;
+    }
+    // open_fileops.h over the shim's FileSystem: rename is replace(), which moves a file to a name that is free
+    struct FsOps
+    {
+        FileSystem* fs;
+        Presence stat(const char* path) { return fs->presence(path); }
+        bool remove(const char* path) { return fs->remove(path); }
+        bool rename(const char* from, const char* to) { return fs->replace(from, to); }
+    };
+
     std::string pathFor(const EngineDef* def, const std::string& name) const
     {
         return (typeFolders ? std::string(def->name) + "/" : std::string()) + name + ".patch";
@@ -1267,18 +1349,36 @@ bool patchBankRevert(int part, Patch& patch, PatchStore& workspace)
 
 namespace
 {
-// A file of the part in the Workspace ("P.patch", "P-b.patch"), read into the scratch buffer and decoded into the scratch data. Its size,
-// 0 when it is missing, damaged, bigger than a patch file may be or of another engine than `typeId`.
-size_t readPartFile(OpenPatchStore& st, int part, int slot, int typeId, ScratchLease& sc)
+enum class PartFile
+{
+    kOk,       // read and decoded into the scratch data
+    kMissing,  // the card says there is no such file
+    kUnusable, // there, but damaged, bigger than a patch file may be or of another engine than `typeId`
+    kError,    // the card failed: the file may be there
+};
+// A file of the part in the Workspace ("P.patch", "P-b.patch"), read into the scratch buffer and decoded into the scratch data. `size`
+// is the length of the file when it is kOk.
+PartFile readPartFile(OpenPatchStore& st, int part, int slot, int typeId, ScratchLease& sc, size_t& size)
 {
     char base[8];
     patchSlotName(part, slot, base);
-    const size_t n = st.readRaw(std::string(base) + ".patch", sc.buf(), kPatchFileMax + 1);
-    if (n == 0 || n > kPatchFileMax)
+    bool ioError = false;
+    const size_t n = st.readRaw(std::string(base) + ".patch", sc.buf(), kPatchFileMax + 1, &ioError);
+    size = 0;
+    if (ioError)
     {
-        return 0;
+        return PartFile::kError;
     }
-    return decodePatch(sc.buf(), n, sc.data()) && typeForEngineId(sc.data().engine) == typeId ? n : 0;
+    if (n == 0)
+    {
+        return PartFile::kMissing; // (an empty file is as good as none)
+    }
+    if (n > kPatchFileMax || !decodePatch(sc.buf(), n, sc.data()) || typeForEngineId(sc.data().engine) != typeId)
+    {
+        return PartFile::kUnusable;
+    }
+    size = n;
+    return PartFile::kOk;
 }
 } // namespace
 
@@ -1289,25 +1389,29 @@ Backup patchBackupSave(int part, Patch& live, PatchStore& workspace)
         return Backup::kFailed;
     }
     OpenPatchStore& st = static_cast<OpenPatchStore&>(workspace);
-    const int typeId = static_cast<OpenPatch&>(live).typeId();
+    const OpenPatch& op = static_cast<OpenPatch&>(live);
+    const int typeId = op.typeId();
     ScratchLease sc;
     if (!sc)
     {
         return Backup::kFailed;
     }
-    const size_t n = readPartFile(st, part, 0, typeId, sc);
-    if (n == 0)
+    size_t n = 0;
+    switch (readPartFile(st, part, 0, typeId, sc, n))
     {
-        return Backup::kFailed;
+        case PartFile::kOk: break;
+        case PartFile::kError: return Backup::kFailed; // slot 0 may hold a patch that the next Init write would replace
+        default: return Backup::kSkipped;              // no file, or none of this engine: there is nothing to keep
     }
     // An untouched Init is not worth a backup: it would push out the patch of an engine the part had before (A -> B -> C -> A).
     // Untouched = the very bytes a new patch of the engine is written as. The file is at most half the buffer then, the new patch
-    // is encoded into the other half.
+    // is encoded into the other half. The Init data comes from the engine definition: no second patch (its metadata would be a heap
+    // allocation that fails when the heap is short, with the old engine still live).
     constexpr size_t kHalf = kPatchFileMax / 2;
-    if (n <= kHalf)
+    if (n <= kHalf && op.getDef())
     {
-        const auto init = st.createPatch(typeId);
-        static_cast<OpenPatch&>(*init).exportData(sc.data());
+        new (&sc.data()) PatchData();
+        initPatchData(*op.getDef(), sc.data());
         const size_t m = encodePatch(sc.data(), sc.buf() + kHalf, kHalf);
         if (m == n && std::memcmp(sc.buf(), sc.buf() + kHalf, n) == 0)
         {
@@ -1332,10 +1436,12 @@ bool patchBackupRestore(int part, Patch& live, PatchStore& workspace)
     {
         return false;
     }
-    const size_t n = readPartFile(st, part, kBackupSlot, op.typeId(), sc);
+    size_t n = 0;
     char base[8];
     patchSlotName(part, 0, base);
-    if (n == 0 || !st.writeRaw(std::string(base) + ".patch", sc.buf(), n))
+    // A backup that is missing, damaged or of another engine is the normal "nothing to restore". One the card could not read, or slot 0
+    // that could not be written, ends the same way (Init) but the backup file is not touched, a later change of engine tries again.
+    if (readPartFile(st, part, kBackupSlot, op.typeId(), sc, n) != PartFile::kOk || !st.writeRaw(std::string(base) + ".patch", sc.buf(), n))
     {
         return false;
     }

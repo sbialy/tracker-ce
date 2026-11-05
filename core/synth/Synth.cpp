@@ -216,15 +216,14 @@ bool Synth::savePatchToWorkspace(int part)
     // The open slot's file: <P>.patch for slot 0, <P>-n.patch otherwise. A slot the Patch FX replaced goes back and the patch is copied
     // out in one audio-free window, the file is written from that copy (old file kept until the new one is complete), and the dirty flag
     // stays when it was not written: the edits are in memory only.
-    if (!polysynth::open::patchSaveOpenSlot(part, *parts[part].patch, *patchStoreWorkspace))
-    {
-        return false;
-    }
+    const bool saved = polysynth::open::patchSaveOpenSlot(part, *parts[part].patch, *patchStoreWorkspace);
+    polysynth::open::settleDirtyAfterSave(saved, parts[part].patchDirty);
+    return saved;
 #else
     patchStoreWorkspace->savePatch(fmt::format("{}", part), *parts[part].patch);
-#endif
     parts[part].patchDirty = false;
     return true;
+#endif
 }
 
 #ifdef FEATURE_SYNTH_OPEN
@@ -249,6 +248,10 @@ bool Synth::loadPatchFromWorkspace(int part, std::optional<std::string> override
         parts[part].patchName = std::move(*overrideName);
     }
 
+#ifdef FEATURE_SYNTH_OPEN
+    // Clean unless the Init fallback could not be written (initPatch sets the flag then: the Init patch is in memory only)
+    parts[part].patchDirty = false;
+#endif
     if (!patchStoreWorkspace->loadPatch(fmt::format("{}", part), *parts[part].patch, true))
     {
         if (!loadPatch(part, parts[part].patchName.c_str()))
@@ -258,7 +261,9 @@ bool Synth::loadPatchFromWorkspace(int part, std::optional<std::string> override
         }
     }
 
+#ifndef FEATURE_SYNTH_OPEN
     parts[part].patchDirty = false;
+#endif
     return fileLoaded;
 }
 
@@ -304,12 +309,12 @@ void Synth::loadSlotNames(int part)
     parts[part].backupName = names->name[0];
 }
 
-void Synth::persistSlotNames(int part)
+bool Synth::persistSlotNames(int part)
 {
     std::unique_ptr<polysynth::open::SlotNames> names(new (std::nothrow) polysynth::open::SlotNames()); // 512 B, off the shared stack
     if (!names)
     {
-        return; // heap short: the file keeps the names it had
+        return false; // heap short: the file keeps the names it had
     }
     const int cur = getPatchSlot(part);
     snprintf(names->name[0], sizeof(names->name[0]), "%s", parts[part].backupName.c_str());
@@ -321,7 +326,7 @@ void Synth::persistSlotNames(int part)
             snprintf(names->name[slot], sizeof(names->name[slot]), "%s", name.c_str());
         }
     }
-    polysynth::open::patchNamesWrite(part, *patchStoreWorkspace, *names);
+    return polysynth::open::patchNamesWrite(part, *patchStoreWorkspace, *names);
 }
 
 bool Synth::backupSlotZero(int part, const char* slotZeroName)
@@ -330,10 +335,15 @@ bool Synth::backupSlotZero(int part, const char* slotZeroName)
     {
         return false; // the edits of the open slot are in its file before slot 0's file is copied, else the engine does not change
     }
-    if (polysynth::open::patchBackupSave(part, *parts[part].patch, *patchStoreWorkspace) == polysynth::open::Backup::kSaved)
+    const polysynth::open::Backup backup = polysynth::open::patchBackupSave(part, *parts[part].patch, *patchStoreWorkspace);
+    if (!polysynth::open::backupAllowsEngineChange(backup))
+    {
+        return false; // the card failed: slot 0 may be a patch that only exists there, the new engine's Init would replace it
+    }
+    if (backup == polysynth::open::Backup::kSaved)
     {
         parts[part].backupName = slotZeroName;
-        persistSlotNames(part);
+        persistSlotNames(part); // a failed write is tried again by the next project save (saveDirtyWorkspacePatches)
     }
     return true;
 }
@@ -425,7 +435,10 @@ bool Synth::saveDirtyWorkspacePatches()
             allSaved = false; // still dirty, the next save tries again
         }
 #ifdef FEATURE_SYNTH_OPEN
-        persistSlotNames(part); // project save: the names go to the Workspace before it is copied to the project
+        if (!persistSlotNames(part)) // project save: the names go to the Workspace before it is copied to the project
+        {
+            allSaved = false; // the project copy would carry stale or no slot names: the save ends with an error, the next one tries again
+        }
 #endif
     }
     return allSaved;
@@ -690,30 +703,23 @@ namespace
 struct BankCopyOps
 {
     FileSystem* fs;
-    const std::string& srcDir;
 
-    polysynth::open::CopyResult copy(const std::string& src, const std::string& dst)
+    polysynth::FileSystem::Presence stat(const std::string& path) { return FileSystemAdapter::statPath(path.c_str()); }
+    bool copyFile(const std::string& src, const std::string& dst)
     {
-        using polysynth::open::CopyResult;
-        if (!fs->exists(src.c_str()))
-        {
-            return CopyResult::kAbsent;
-        }
         const std::string tmp = dst + ".tmp";
         if (!cFileTransfer::copyFile(fs, src.c_str(), tmp.c_str())) // it deletes tmp itself when it fails
         {
-            return CopyResult::kFailed;
+            return false;
         }
         if (!FileSystemAdapter::replaceFile(fs, tmp.c_str(), dst.c_str()))
         {
             fs->remove(tmp.c_str());
-            return CopyResult::kFailed;
+            return false;
         }
-        return CopyResult::kCopied;
+        return true;
     }
-    bool exists(const std::string& path) { return fs->exists(path.c_str()); }
     bool remove(const std::string& path) { return fs->remove(path.c_str()); }
-    bool sourceReadable() { return fs->exists(srcDir.c_str()); }
 };
 } // namespace
 #endif
@@ -726,7 +732,7 @@ bool Synth::copyWorkspacePatches(const char* sourceProjectPath, const char* dest
     // a file it does not have is removed from the destination (a slot never survives from another project) once every copy worked.
     const std::string srcDir = sourceProjectPath;
     const std::string dstDir = destinationProjectPath;
-    BankCopyOps ops{ filesystem, srcDir };
+    BankCopyOps ops{ filesystem };
     bool allCopied = true;
     for (int part = 0; part < kSynthParts; part++)
     {

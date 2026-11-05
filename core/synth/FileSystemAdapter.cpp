@@ -2,6 +2,9 @@
 #ifdef FEATURE_SYNTH
 #include "FileSystemAdapter.h"
 #include "config.h"
+#ifdef FEATURE_SYNTH_OPEN
+#include "open_fileops.h"
+#endif
 
 #include "cr_section_macros.h"
 #include <algorithm>
@@ -100,6 +103,24 @@ void FileSystemAdapter::createFolder(const std::string& path)
     platformFileSystem->mkdir(0, (pathPrefix + path).c_str());
 }
 
+#ifdef FEATURE_SYNTH_OPEN
+extern "C" unsigned f_stat(const char* path, void* fileInfo); // FatFs (platforms/mk66/3rdparty/SD/fatfs/source/ff.h), FR_OK 0, FR_NO_FILE 4
+
+polysynth::FileSystem::Presence FileSystemAdapter::statPath(const char* path)
+{
+    // The platform exists() folds every card error into "not there". FatFs answers FR_NO_FILE only after it walked the folder and found
+    // no such entry (a read error is another code, and FR_NO_PATH, a folder that is not there, is not taken as proof either).
+    constexpr unsigned kFrOk = 0;
+    constexpr unsigned kFrNoFile = 4;
+    const unsigned r = f_stat(path, nullptr);
+    return r == kFrOk ? Presence::kPresent : r == kFrNoFile ? Presence::kAbsent : Presence::kUnknown;
+}
+
+polysynth::FileSystem::Presence FileSystemAdapter::presence(const std::string& path)
+{
+    return statPath((pathPrefix + path).c_str());
+}
+
 bool FileSystemAdapter::replace(const std::string& from, const std::string& to)
 {
     return replaceFile(platformFileSystem, (pathPrefix + from).c_str(), (pathPrefix + to).c_str());
@@ -110,41 +131,22 @@ bool FileSystemAdapter::remove(const std::string& path)
     return platformFileSystem->remove((pathPrefix + path).c_str());
 }
 
+namespace
+{
+struct PlatformFileOps
+{
+    ::FileSystem* fs;
+    polysynth::FileSystem::Presence stat(const char* path) { return FileSystemAdapter::statPath(path); }
+    bool remove(const char* path) { return fs->remove(path); }
+    bool rename(const char* from, const char* to) { return fs->rename(from, to); }
+};
+} // namespace
+
 bool FileSystemAdapter::replaceFile(::FileSystem* fileSystem, const char* from, const char* to)
 {
-    // FatFs does not rename over a file: the old one steps aside as <to>.bak and goes back if the new one cannot take its place.
-    // A stale .bak (power loss in between) is the old file, it is replaced here.
-    constexpr size_t kPathMax = 128;
-    char bak[kPathMax];
-    if (snprintf(bak, sizeof(bak), "%s.bak", to) >= static_cast<int>(sizeof(bak)))
-    {
-        return false;
-    }
-    const bool hadOld = fileSystem->exists(to);
-    if (hadOld)
-    {
-        if (fileSystem->exists(bak) && !fileSystem->remove(bak))
-        {
-            return false;
-        }
-        if (!fileSystem->rename(to, bak))
-        {
-            return false;
-        }
-    }
-    if (!fileSystem->rename(from, to))
-    {
-        if (hadOld)
-        {
-            fileSystem->rename(bak, to);
-        }
-        return false;
-    }
-    if (hadOld)
-    {
-        fileSystem->remove(bak);
-    }
-    return true;
+    PlatformFileOps ops{ fileSystem };
+    return polysynth::open::replaceFileOps(ops, from, to);
 }
+#endif
 #endif
 // NOLINTEND

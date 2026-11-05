@@ -118,6 +118,10 @@ class OpenPatch final : public Patch
     PatchExtra extra;                    // raw .patch fields kept for the round trip
 };
 
+// The data of a new patch of the engine (what exportData of a fresh OpenPatch gives, cold), made from the engine definition alone: no
+// OpenPatch, no metadata, so no heap. `d` must be fresh (default constructed).
+void initPatchData(const EngineDef& def, PatchData& d);
+
 // The patch store (cold, open_cold.cpp)
 std::unique_ptr<PatchStore> makePatchStore(const InstrumentTypeRegistry& registry,
                                            FileSystem* fs,

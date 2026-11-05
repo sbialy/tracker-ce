@@ -41,9 +41,29 @@ class FileSystem
 
     virtual void createFolder(const std::string& path) = 0;
 
+    virtual ~FileSystem() = default;
+
+#ifdef FEATURE_SYNTH_OPEN
+    // Open shim only, declared after the destructor so the vtable of the closed library's FileSystem keeps its layout.
+
+    /** What the card said about a path: kAbsent only when the card walked the folder and found no such entry, kUnknown for any card error. */
+    enum class Presence
+    {
+        kAbsent,
+        kPresent,
+        kUnknown,
+    };
+    /** The default knows nothing. */
+    virtual Presence presence(const std::string& path)
+    {
+        (void)path;
+        return Presence::kUnknown;
+    }
     /**
-     * Replaces the file `to` by the file `from` (same folder). The file `to` is never lost: if this returns false it is as it was
-     * (`from` may be left behind). The default does nothing and fails.
+     * Replaces the file `to` by the file `from` (same folder): the old file steps aside as `to`.bak and is deleted once `from` is in place.
+     * False: nothing was replaced. `to` is as it was or, when the move back failed or the power went, absent with the old file at
+     * `to`.bak: a reader that finds `to` absent moves `to`.bak back first (OpenPatchStore, open_cold.cpp). `from` may be left behind.
+     * The default does nothing and fails.
      */
     virtual bool replace(const std::string& from, const std::string& to)
     {
@@ -57,7 +77,6 @@ class FileSystem
         (void)path;
         return false;
     }
-
-    virtual ~FileSystem() = default;
+#endif
 };
 }

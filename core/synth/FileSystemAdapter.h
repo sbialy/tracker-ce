@@ -21,12 +21,17 @@ class FileSystemAdapter : public polysynth::FileSystem
     bool seek(FileHandle file, int offset) override;
 
     void createFolder(const std::string& path) override;
+#ifdef FEATURE_SYNTH_OPEN
+    Presence presence(const std::string& path) override;
     bool replace(const std::string& from, const std::string& to) override;
     bool remove(const std::string& path) override;
 
-    // `to` becomes the file `from`, both full paths. `to` keeps its old content unless the replacement is complete: it is moved
-    // aside first and moved back when the rename of `from` fails. False: `to` is as it was.
+    // `to` becomes the file `from`, both full paths (open_fileops.h): the old file steps aside as <to>.bak and goes back when the rename of
+    // `from` fails. When that fails too, or the power goes, `to` is absent and readers move <to>.bak back. False: nothing was replaced.
     static bool replaceFile(::FileSystem* fileSystem, const char* from, const char* to);
+    // The card's answer for a full path: absent only on FR_NO_FILE, unknown on any card error.
+    static polysynth::FileSystem::Presence statPath(const char* path);
+#endif
 
     static void staticInit();
 

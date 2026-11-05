@@ -141,7 +141,8 @@ class Synth
     bool applyPatchBankSlot(int part, int slot);
     // Names of slots 1..15 live in the side file <P>.names next to the slot files (see synth-open/open_slotnames.h). Written whenever
     // a name changes and on project save, read on project load.
-    void persistSlotNames(int part);
+    // False: the names file could not be written (or read before): the caller does not call the names saved.
+    bool persistSlotNames(int part);
     void patchNameChanged(int part) // the open slot got another name (library load, save as, Init)
     {
         if (getPatchSlot(part) > 0)

@@ -2,6 +2,7 @@
 // Plain C++ over a small file operations type, so the host smoke test runs the same code with an in-memory card that fails on request.
 #pragma once
 
+#include "open_fileops.h"
 #include "open_load.h"
 
 #include <cstdint>
@@ -9,13 +10,6 @@
 
 namespace polysynth::open
 {
-
-enum class CopyResult
-{
-    kCopied,
-    kAbsent, // the source file is not there
-    kFailed, // the source could not be read or the destination written: the destination file is as it was
-};
 
 // The files of a part: its slot files 0..15, the slot 0 backup and the slot names, in this order. Name without folder.
 constexpr int kBankFiles = kBackupSlot + 2;
@@ -27,14 +21,16 @@ inline std::string bankFileName(int part, int index)
 }
 
 // Copies the bank files of `part` from `srcDir` to `dstDir`. `Ops` provides
-//   CopyResult copy(const std::string& src, const std::string& dst)  kAbsent when src does not exist, else the whole file or kFailed
-//   bool exists(const std::string& path)
+//   Presence stat(const std::string& path)   kAbsent only when the card found no such entry, kUnknown on any card error (never a failed lookup
+//                                            taken for "not there": it would delete a saved file)
+//   bool copyFile(const std::string& src, const std::string& dst)   the whole file replaces dst or dst stays as it is (false)
 //   bool remove(const std::string& path)
-//   bool sourceReadable()   the source folder can be read, so a file that is not there is really not there
-// Every file that exists in the source replaces the destination file only when it was copied completely. A file the source does not have
-// is removed from the destination (a slot never survives from another project), but only after every copy worked and only when the
-// source folder is readable. Slot 0 is never removed (stock firmware knows only that file). False: some file could not be copied or
-// removed, the caller reports it. The files that were not touched are as they were.
+// A source file that is not there but has an old version at <file>.bak (an interrupted replace) is copied from the .bak. Every file that
+// exists in the source replaces the destination file only when it was copied completely. A file the source does not have (the card
+// said so for the file and for its .bak) is removed from the destination, with its .bak (a slot never survives from another project),
+// but only after every copy worked and only when the destination's own state is known. Slot 0 is never removed (stock firmware knows
+// only that file). False: some file could not be copied or removed, or the card could not say, the caller reports it and nothing has been
+// removed on a guess. The files that were not touched are as they were.
 template <class Ops>
 bool copyPartBank(Ops& ops, int part, const std::string& srcDir, const std::string& dstDir)
 {
@@ -43,30 +39,52 @@ bool copyPartBank(Ops& ops, int part, const std::string& srcDir, const std::stri
     for (int i = 0; i < kBankFiles; i++)
     {
         const std::string file = bankFileName(part, i);
-        const CopyResult r = ops.copy(srcDir + "\\" + file, dstDir + "\\" + file);
-        if (r == CopyResult::kFailed)
+        const std::string src = srcDir + "\\" + file;
+        std::string from = src;
+        Presence p = ops.stat(src);
+        if (p == Presence::kAbsent)
+        {
+            const std::string bak = src + ".bak";
+            const Presence b = ops.stat(bak);
+            if (b == Presence::kPresent)
+            {
+                from = bak;
+                p = Presence::kPresent;
+            }
+            else if (b == Presence::kUnknown)
+            {
+                p = Presence::kUnknown;
+            }
+        }
+        if (p == Presence::kUnknown)
         {
             return false;
         }
-        if (r == CopyResult::kAbsent && i > 0)
+        if (p == Presence::kAbsent)
         {
-            absent |= 1u << i;
+            if (i > 0)
+            {
+                absent |= 1u << i;
+            }
+            continue;
         }
-    }
-    if (absent == 0)
-    {
-        return true;
-    }
-    if (!ops.sourceReadable())
-    {
-        return false; // "not there" may be the card failing, nothing is removed on that word
+        if (!ops.copyFile(from, dstDir + "\\" + file))
+        {
+            return false;
+        }
     }
     for (int i = 1; i < kBankFiles; i++)
     {
-        if (absent & (1u << i))
+        if (!(absent & (1u << i)))
         {
-            const std::string dst = dstDir + "\\" + bankFileName(part, i);
-            if (ops.exists(dst) && !ops.remove(dst))
+            continue;
+        }
+        const std::string dst = dstDir + "\\" + bankFileName(part, i);
+        // the .bak first: a power loss in between leaves a file that the next save prunes again, never a .bak that a reader brings back
+        for (const std::string& path : { dst + ".bak", dst })
+        {
+            const Presence p = ops.stat(path);
+            if (p == Presence::kUnknown || (p == Presence::kPresent && !ops.remove(path)))
             {
                 return false;
             }

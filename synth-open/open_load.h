@@ -62,8 +62,9 @@ static_assert(kSlotNameSlots == kPatchBankSlots, "one name per slot");
 bool patchNamesRead(int part, PatchStore& workspace, SlotNames& out);
 bool patchNamesWrite(int part, PatchStore& workspace, const SlotNames& in);
 // Engine change, main thread, the old engine still live and its slot 0 file (<P>.patch) up to date: keeps that file as <P>-b.patch.
-// kSkipped: slot 0 is an untouched Init (the bytes of a new patch of the engine), an older backup stays. kFailed: there is no readable
-// slot 0 file of the live engine or the copy failed, an older backup stays.
+// kSkipped: there is nothing to keep, slot 0 is an untouched Init (the bytes of a new patch of the engine), has no file or no file of the live
+// engine, an older backup stays. kFailed: the card failed (slot 0 could not be read, or the backup could not be written): slot 0 may be a
+// patch that the new engine's Init would replace, the caller must not change the engine. An older backup stays.
 enum class Backup
 {
     kFailed,
@@ -71,6 +72,18 @@ enum class Backup
     kSaved,
 };
 Backup patchBackupSave(int part, Patch& live, PatchStore& workspace);
+// The engine may change after this backup result: every result but kFailed (a patch that could not be kept must not be replaced).
+inline bool backupAllowsEngineChange(Backup result)
+{
+    return result != Backup::kFailed;
+}
+// Where a save of the open slot leaves the part's dirty flag, on every path that saves (slot select, engine change, project save, accepting a
+// library patch): saved clears it, a failed save sets it, even when the patch was clean before (an accepted library patch is not dirty until
+// it is saved), so a later project save or slot select retries it and never discards it.
+inline void settleDirtyAfterSave(bool saved, bool& patchDirty)
+{
+    patchDirty = !saved;
+}
 // Engine change, main thread, after the new engine's Init patch is live and the bank was rebuilt for it: if <P>-b.patch is a file of
 // that engine (the engine field of the file decides, as for every slot file) it becomes slot 0: written to <P>.patch, loaded into the
 // live patch and the bank. False: nothing changed, the caller loads Init.

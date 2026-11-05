@@ -18,6 +18,7 @@
 #include "open_patch.h"
 #include "PolySynth/FileSystem.h"
 #include <map>
+#include <set>
 #ifdef OT_ORACLE
 #include "formats/patch_pb.h"
 #endif
@@ -64,7 +65,7 @@ struct MemFS : FileSystem {
     return std::vector<std::string_view>(listed.begin(), listed.end()); }
   std::optional<FileHandle> open(const std::string& path, OpenOptions o) override {
     const bool w = o == OpenOptions::kWrite; if (!w && onRead) onRead(path);   // the audio callback runs while the card is read
-    if (!w && !files.count(path)) return std::nullopt; if (w && failOpenWrite) return std::nullopt;
+    if (!w && (!files.count(path) || failOpenRead.count(path))) return std::nullopt; if (w && failOpenWrite) return std::nullopt;
     if (w) files[path].clear();
     hs.push_back(new H{path, 0, w}); openNow++; return hs.back(); }
   int openNow = 0; // open handles (FatFs on the device has a fixed table, a leak ends in failed opens)
@@ -82,25 +83,36 @@ struct MemFS : FileSystem {
   bool replace(const std::string& from, const std::string& to) override {
     if (failReplace || !files.count(from)) return false; files[to] = std::move(files[from]); files.erase(from); return true; }
   bool remove(const std::string& path) override { return files.erase(path) > 0; }
+  Presence presence(const std::string& path) override { return statError.count(path) ? Presence::kUnknown : files.count(path) ? Presence::kPresent : Presence::kAbsent; }
   // failure injection and hooks of the save, load and copy tests
   bool failOpenWrite = false, failWrite = false, failReplace = false; int readFailAt = -1;
+  std::set<std::string> statError, failOpenRead;   // paths the card cannot stat (kUnknown), existing files that do not open
   std::function<void(const std::string&)> onRead, onWrite;
-  void healthy() { failOpenWrite = failWrite = failReplace = false; readFailAt = -1; onRead = nullptr; onWrite = nullptr; }
+  void healthy() { failOpenWrite = failWrite = failReplace = false; readFailAt = -1; onRead = nullptr; onWrite = nullptr; statError.clear(); failOpenRead.clear(); }
 };
 // The card operations of the bank copy (Synth::copyWorkspacePatches) over two in-memory folders: paths "S\\name" are the source folder, "D\\name" the destination.
 struct MemBankOps {
   using Files = std::map<std::string, std::vector<uint8_t>>;
-  Files* src; Files* dst; std::string failCopy;       // failCopy: the copy of this file fails (the destination keeps what it had)
-  bool readable = true, failRemove = false; int removed = 0;
+  Files* src; Files* dst; std::string failCopy;       // failCopy: the copy to this file fails (the destination keeps what it had)
+  std::set<std::string> statErr;                      // paths the card cannot stat ("S\\0-2.patch"): kUnknown
+  bool failRemove = false; int removed = 0;
   Files& mapOf(const std::string& p) { return p[0] == 'S' ? *src : *dst; }
   static std::string base(const std::string& p) { return p.substr(2); }
-  open::CopyResult copy(const std::string& a, const std::string& b) {
-    auto it = mapOf(a).find(base(a)); if (it == mapOf(a).end()) return open::CopyResult::kAbsent;
-    if (base(b) == failCopy) return open::CopyResult::kFailed;
-    mapOf(b)[base(b)] = it->second; return open::CopyResult::kCopied; }
-  bool exists(const std::string& p) { return mapOf(p).count(base(p)) > 0; }
+  open::Presence stat(const std::string& p) { return statErr.count(p) ? open::Presence::kUnknown : mapOf(p).count(base(p)) ? open::Presence::kPresent : open::Presence::kAbsent; }
+  bool copyFile(const std::string& a, const std::string& b) {
+    auto it = mapOf(a).find(base(a)); if (it == mapOf(a).end() || base(b) == failCopy) return false;
+    mapOf(b)[base(b)] = it->second; return true; }
   bool remove(const std::string& p) { if (failRemove) return false; removed++; return mapOf(p).erase(base(p)) > 0; }
-  bool sourceReadable() { return readable; }
+};
+// A FatFs-like card for open_fileops.h: rename fails when the target exists, a rename can be made to fail (bit k of failMask: the k-th rename),
+// and the power can go after the n-th change (every later call does nothing and says unknown / false).
+struct RenameOps {
+  std::map<std::string, std::string> f; int renames = 0, changes = 0, failMask = 0, powerAfter = -1; bool dead = false;
+  void step() { if (powerAfter >= 0 && changes >= powerAfter) dead = true; }
+  open::Presence stat(const char* p) { step(); if (dead) return open::Presence::kUnknown; return f.count(p) ? open::Presence::kPresent : open::Presence::kAbsent; }
+  bool remove(const char* p) { step(); if (dead) return false; changes++; return f.erase(p) > 0; }
+  bool rename(const char* a, const char* b) { step(); if (dead) return false; const int k = renames++; if (failMask >> k & 1) return false;
+    if (!f.count(a) || f.count(b)) return false; changes++; f[b] = f[a]; f.erase(a); return true; }
 };
 // A short heap, as on the device after a while: nothrow new (what the patch store and bank use) fails above gShortHeap bytes (0: off)
 static size_t gShortHeap = 0;
@@ -704,7 +716,7 @@ int main() {
       open::patchBankPreload(0, *live, *ws);
       bool ok = nameOf(0, open::kBackupSlot) == "0-b" && nameOf(2, open::kBackupSlot) == "2-b" && nameOf(1, 15) == "1-15";
       using BK = open::Backup;
-      ok = ok && open::patchBackupSave(0, *live, *ws) == BK::kFailed && mw->files.count("0-b.patch") == 0;            // no slot 0 file yet
+      ok = ok && open::patchBackupSave(0, *live, *ws) == BK::kSkipped && mw->files.count("0-b.patch") == 0;           // no slot 0 file yet: nothing to keep
       ws->savePatch("0", *live);
       ok = ok && open::patchBackupSave(0, *live, *ws) == BK::kSkipped && mw->files.count("0-b.patch") == 0;           // untouched Init: no backup
       const auto& m0 = live->getMetadata(); const float v0 = *live->getParamValue(0), hi = float(m0.params[0].maxValue), lo = float(m0.params[0].minValue);
@@ -715,9 +727,9 @@ int main() {
       live->setParamValue(0, v0, Patch::ParamChangeSource::kKnob); ws->savePatch("0", *live);                          // slot 0 back to the Init values
       ok = ok && open::patchBackupSave(0, *live, *ws) == BK::kSkipped && mw->files["0-b.patch"] == kept;                // an older backup stays
       mw->files["0.patch"] = {1, 2, 3, 4};
-      ok = ok && open::patchBackupSave(0, *live, *ws) == BK::kFailed && mw->files["0-b.patch"] == kept;                 // damaged slot 0 file
+      ok = ok && open::patchBackupSave(0, *live, *ws) == BK::kSkipped && mw->files["0-b.patch"] == kept;                // damaged slot 0 file: nothing to keep
       mw->files["0.patch"].assign(9000, 7);
-      ok = ok && open::patchBackupSave(0, *live, *ws) == BK::kFailed && mw->files["0-b.patch"] == kept;                // over kPatchFileMax
+      ok = ok && open::patchBackupSave(0, *live, *ws) == BK::kSkipped && mw->files["0-b.patch"] == kept;               // over kPatchFileMax
       check(ok, "slot 0 backup: an untouched Init, a damaged or missing slot 0 file leave the backup alone, an edited slot 0 is copied byte for byte");
       // restore: the backup is of this engine -> slot 0 file, live patch and bank; foreign engine, damaged or missing -> nothing changes
       ws->savePatch("0", *live);
@@ -780,7 +792,7 @@ int main() {
         std::unique_ptr<Patch> live; int type = 0; std::string name, projName, slotNames[16], backupName; bool dirty = false;
       } m;
       auto savePart = [&]() {                                           // Synth::savePatchToWorkspace
-        open::patchSaveOpenSlot(0, *m.live, *ws); m.dirty = false; };
+        const bool saved = open::patchSaveOpenSlot(0, *m.live, *ws); open::settleDirtyAfterSave(saved, m.dirty); return saved; };
       auto persist = [&]() {                                            // Synth::persistSlotNames
         open::SlotNames nm; std::snprintf(nm.name[0], sizeof(nm.name[0]), "%s", m.backupName.c_str());
         const int cur = open::patchBankCurrent(0);
@@ -810,16 +822,18 @@ int main() {
           m.dirty = false; persist(); }
         return r; };
       auto changeEngine = [&](int type) {                               // SynthEditor::changeSynthModel
-        if (m.dirty && open::patchBankCurrent(0) > 0) savePart();       // Synth::flushPatchSlot
-        if (m.dirty) savePart();                                        // Synth::backupSlotZero
-        if (open::patchBackupSave(0, *m.live, *ws) == open::Backup::kSaved) { m.backupName = m.projName; persist(); }
+        if (m.dirty && open::patchBankCurrent(0) > 0 && !savePart()) return false;   // Synth::flushPatchSlot
+        if (m.dirty && !savePart()) return false;                       // Synth::backupSlotZero
+        const auto bk = open::patchBackupSave(0, *m.live, *ws);
+        if (!open::backupAllowsEngineChange(bk)) return false;          // a failed backup: the engine stays
+        if (bk == open::Backup::kSaved) { m.backupName = m.projName; persist(); }
         m.type = type; auto fresh = ws->createPatch(type);              // Synth::setInstrumentType
         open::patchBankSetLive(0, fresh.get()); m.live = std::move(fresh); m.name = "Init";
         open::patchBankPreload(0, *m.live, *ws); m.slotNames[0].clear();
         if (open::patchBackupRestore(0, *m.live, *ws)) { m.name = m.backupName.empty() ? "Unnamed" : m.backupName; m.dirty = false; }   // Synth::restoreSlotZeroBackup
         else { open::patchSaveOpenSlot(0, *m.live, *ws); m.dirty = false; }                        // initCurrentPatch -> initPatch
         m.projName = m.name;
-        persist(); };                                                    // the autosave that follows
+        persist(); return true; };                                       // the autosave that follows
       auto sameAsFile = [&](const std::vector<uint8_t>& file) {          // the live patch holds the values of that file
         open::PatchData pd; auto& op = static_cast<open::OpenPatch&>(*m.live);
         if (!open::decodePatch(file.data(), file.size(), pd) || open::typeForEngineId(pd.engine) != m.type) return false;
@@ -998,6 +1012,7 @@ int main() {
         check(ok, "B4: a library or Workspace save that fails keeps the old file and makes no new one");
       }
       // B5: the bank copy replaces a file only with a complete copy, deletes nothing before every copy worked, and fails loudly
+      // N2: and removes a destination file only when the card said the source has none, never on a failed lookup
       {
         MemBankOps::Files S, D;
         auto reset = [&]() { S.clear(); D.clear();
@@ -1005,15 +1020,147 @@ int main() {
           D["0.patch"] = {10}; D["0-1.patch"] = {11}; D["0-2.patch"] = {12}; D["0-5.patch"] = {15}; D["0-b.patch"] = {16}; D["0.names"] = {19}; };
         reset(); MemBankOps ops{ &S, &D, "0-2.patch" };
         bool ok = !open::copyPartBank(ops, 0, "S", "D") && D["0-2.patch"] == std::vector<uint8_t>{12} && D.count("0-5.patch") && D.count("0-b.patch") && ops.removed == 0;   // a failed copy: no file lost
-        reset(); ops.failCopy = ""; ops.readable = false;
-        ok = ok && !open::copyPartBank(ops, 0, "S", "D") && D.count("0-5.patch") && D.count("0-b.patch") && ops.removed == 0;   // "absent" on an unreadable source: nothing removed
-        reset(); ops.readable = true; ops.failRemove = true;
+        reset(); ops.failCopy = ""; ops.failRemove = true;
         ok = ok && !open::copyPartBank(ops, 0, "S", "D") && D["0-1.patch"] == std::vector<uint8_t>{2};                           // a remove that fails is reported
         reset(); ops.failRemove = false;
         ok = ok && open::copyPartBank(ops, 0, "S", "D") && D["0-2.patch"] == std::vector<uint8_t>{3} && !D.count("0-5.patch") && !D.count("0-b.patch") && D["0.names"] == std::vector<uint8_t>{9};
         reset(); S.erase("0.patch"); S.erase("0.names");
         ok = ok && open::copyPartBank(ops, 0, "S", "D") && D["0.patch"] == std::vector<uint8_t>{10} && !D.count("0.names");       // slot 0 is never removed, the names file is
         check(ok, "B5: a failed bank copy reports it and deletes nothing, a good one replaces the files and prunes the slots the source lacks");
+        // N2: a source file that exists but whose lookup fails is not "absent": nothing is pruned, the saved destination file stays, the copy reports it
+        reset(); S["0-7.patch"] = {7}; D["0-7.patch"] = {77}; ops.removed = 0; ops.statErr = { "S\\0-7.patch" };
+        ok = !open::copyPartBank(ops, 0, "S", "D") && D["0-7.patch"] == std::vector<uint8_t>{77} && D.count("0-5.patch") && D.count("0-b.patch") && ops.removed == 0;
+        reset(); ops.statErr = { "S\\0-5.patch" };                                  // the lookup of a slot the source does not have fails: not proof either
+        ok = ok && !open::copyPartBank(ops, 0, "S", "D") && D.count("0-5.patch") && D.count("0-b.patch") && ops.removed == 0;
+        reset(); ops.statErr = { "S\\0-5.patch.bak" };                              // so does the lookup of its .bak
+        ok = ok && !open::copyPartBank(ops, 0, "S", "D") && D.count("0-5.patch") && ops.removed == 0;
+        reset(); ops.statErr = { "D\\0-5.patch" };                                  // the destination's state unknown: not removed, not reported as pruned
+        ok = ok && !open::copyPartBank(ops, 0, "S", "D") && D.count("0-5.patch");
+        reset(); ops.statErr.clear();
+        check(ok, "N2: a failed lookup of a source file, its .bak or the destination file prunes nothing and fails the copy");
+        // N1: a source file that an interrupted replace left at <file>.bak is copied from there, not taken for absent and pruned
+        S["0-5.patch.bak"] = {55}; S["0-2.patch.bak"] = {33}; S.erase("0-2.patch"); D["0-6.patch.bak"] = {66}; D["0-6.patch"] = {6};
+        ok = open::copyPartBank(ops, 0, "S", "D") && D["0-5.patch"] == std::vector<uint8_t>{55} && D["0-2.patch"] == std::vector<uint8_t>{33}
+             && !D.count("0-6.patch") && !D.count("0-6.patch.bak") && !D.count("0-b.patch");   // a pruned slot takes its .bak with it, the others are not pruned
+        check(ok, "N1: the bank copy takes a file from <file>.bak when the canonical one is gone, and prunes a slot together with its .bak");
+      }
+      // N1: replaceFileOps over a card with FatFs rename rules, any rename failing and the power going at any step. The old file is never lost:
+      // after the reader's recovery the file is the old one or the new one, and a replace that said true leaves the new one
+      {
+        bool ok = true; int stranded = 0, scenarios = 0;
+        for (int mask = 0; mask < 8; mask++) for (int power = -1; power < 8; power++) {
+          RenameOps card; card.f["D\\0.patch"] = "old"; card.f["D\\0.patch.tmp"] = "new"; card.failMask = mask; card.powerAfter = power;
+          const bool done = open::replaceFileOps(card, "D\\0.patch.tmp", "D\\0.patch");
+          if (!card.f.count("D\\0.patch")) stranded++;                  // the state the loaders used to leave alone
+          card.failMask = 0; card.powerAfter = -1; card.dead = false;     // the next start, a healthy card
+          const auto rec = open::recoverBackupOps(card, "D\\0.patch");
+          const std::string now = card.f.count("D\\0.patch") ? card.f["D\\0.patch"] : std::string("MISSING");
+          ok = ok && rec == open::Presence::kPresent && (now == "old" || now == "new") && (!done || now == "new");
+          if (done && power < 0) ok = ok && card.f.size() == 1;           // no .bak left behind after a clean replace
+          scenarios++;
+        }
+        ok = ok && stranded > 0 && scenarios == 72;
+        RenameOps card; card.f["D\\0.patch.bak"] = "old"; card.f["D\\0.patch.tmp"] = "half";                 // power lost between the two renames: .bak and a leftover .tmp
+        ok = ok && open::recoverBackupOps(card, "D\\0.patch") == open::Presence::kPresent && card.f["D\\0.patch"] == "old" && card.f.count("D\\0.patch.tmp"); // .tmp is never promoted
+        RenameOps lost; ok = ok && open::recoverBackupOps(lost, "D\\0.patch") == open::Presence::kAbsent;   // nothing there, nothing to restore
+        RenameOps both; both.f["D\\0.patch"] = "new"; both.f["D\\0.patch.bak"] = "old"; ok = ok && open::recoverBackupOps(both, "D\\0.patch") == open::Presence::kPresent && both.f["D\\0.patch"] == "new";   // a present file is never replaced
+        RenameOps first; first.f["D\\0.patch.tmp"] = "new";                                                  // no old file: the new one is installed, an orphan .bak goes
+        first.f["D\\0.patch.bak"] = "older"; ok = ok && open::replaceFileOps(first, "D\\0.patch.tmp", "D\\0.patch") && first.f["D\\0.patch"] == "new" && !first.f.count("D\\0.patch.bak");
+        RenameOps unk; unk.f["D\\0.patch"] = "old"; unk.f["D\\0.patch.tmp"] = "new"; unk.powerAfter = 0;      // the card cannot say whether there is an old file: nothing is touched
+        ok = ok && !open::replaceFileOps(unk, "D\\0.patch.tmp", "D\\0.patch") && unk.f["D\\0.patch"] == "old" && unk.f["D\\0.patch.tmp"] == "new";
+        check(ok, "N1: a replace that fails or loses power at any step leaves the old or the new file after the reader's recovery, never none");
+      }
+      // N1: the readers (patch, names, backup, slot select, bank) move <file>.bak back before they take a file for missing, and nothing falls back to Init
+      {
+        auto live = setup();
+        auto strand = [&](const char* name) { const std::string f = std::string(name); mw->files[f + ".bak"] = mw->files[f]; mw->files.erase(f); mw->files[f + ".tmp"] = {1, 2, 3}; };
+        strand("0.patch");
+        auto probe = ws->createPatch(T);
+        bool ok = ws->loadPatch("0", *probe, true) && raw(*probe) == baseV && mw->files.count("0.patch") && !mw->files.count("0.patch.bak");   // slot 0 loads the old file, not Init
+        strand("0-1.patch");
+        ok = ok && open::patchBankSelect(0, 1, *live, *ws) == open::SlotSelect::kLoaded && raw(*live) == loV && mw->files.count("0-1.patch");   // a slot select, not an empty copy
+        strand("0-3.patch"); open::patchBankPreload(0, *live, *ws); ok = ok && open::patchBankApply(0, 3) && raw(*live) == hiV;                // the bank counts the slot
+        open::SlotNames nm; std::snprintf(nm.name[2], sizeof(nm.name[2]), "Pad"); ok = ok && open::patchNamesWrite(0, *ws, nm);
+        strand("0.names"); open::SlotNames back; ok = ok && open::patchNamesRead(0, *ws, back) && std::strcmp(back.name[2], "Pad") == 0 && mw->files.count("0.names");
+        mw->files["0-b.patch"] = mw->files["0-3.patch"]; strand("0-b.patch");   // a backup of this engine at <P>-b.patch.bak
+        { auto l2 = ws->createPatch(T); open::patchBankSetLive(0, l2.get()); ok = ok && open::patchBackupRestore(0, *l2, *ws) && raw(*l2) == hiV && fileValues("0") == hiV; open::patchBankSetLive(0, live.get()); }
+        // the card cannot say, or the move back fails: an error, never "missing"
+        live = setup(); strand("0-1.patch"); mw->statError = { "0-1.patch.bak" };
+        ok = ok && open::patchBankSelect(0, 1, *live, *ws) == open::SlotSelect::kError && open::patchBankCurrent(0) == 0;
+        mw->healthy(); mw->failReplace = true;                                                                     // the move back fails
+        ok = ok && open::patchBankSelect(0, 1, *live, *ws) == open::SlotSelect::kError && !mw->files.count("0-1.patch") && mw->files.count("0-1.patch.bak");
+        mw->healthy(); ok = ok && open::patchBankSelect(0, 1, *live, *ws) == open::SlotSelect::kLoaded && raw(*live) == loV;
+        check(ok, "N1: every reader moves <file>.bak back when the canonical file is gone, a failed move back or lookup is an error, not an empty slot");
+      }
+      // S4: a file that is there but does not open is an error, not an empty slot (an edit of the "empty" copy would overwrite the real slot)
+      {
+        auto live = setup(); mw->failOpenRead = { "0-1.patch" };
+        auto probe = ws->createPatch(T);
+        bool ok = open::patchBankSelect(0, 1, *live, *ws) == open::SlotSelect::kError && open::patchBankCurrent(0) == 0 && !ws->loadPatch("0-1", *probe, true);
+        mw->healthy(); mw->failOpenRead = { "0-2.patch" };                                    // slot 2 has no file: confirmed absent, a copy as before
+        ok = ok && open::patchBankSelect(0, 2, *live, *ws) == open::SlotSelect::kCopied;
+        mw->healthy(); open::SlotNames nm; std::snprintf(nm.name[1], sizeof(nm.name[1]), "Kept"); ok = ok && open::patchNamesWrite(0, *ws, nm);
+        const auto names = mw->files["0.names"]; open::SlotNames back;
+        mw->failOpenRead = { "0.names" };                                                     // the names file does not open: unread, not empty
+        ok = ok && !open::patchNamesRead(0, *ws, back) && !open::patchNamesWrite(0, *ws, open::SlotNames()) && mw->files["0.names"] == names;
+        mw->healthy(); ok = ok && open::patchNamesRead(0, *ws, back) && std::strcmp(back.name[1], "Kept") == 0;
+        check(ok, "S4: an existing file that fails to open is an error for the slot select and the names (nothing is overwritten), a missing one is an empty slot");
+      }
+      // N3: the engine change stops when the backup of slot 0 failed, and goes on when there was nothing to keep. N4: a failed save keeps the part dirty
+      {
+        auto live = setup();                                                                  // slot 0 = base (not an Init): worth a backup
+        const auto kept = mw->files["0.patch"];
+        mw->failReplace = true;
+        const auto fail = open::patchBackupSave(0, *live, *ws);                              // the backup cannot be written
+        mw->healthy(); mw->readFailAt = 20;
+        const auto readFail = open::patchBackupSave(0, *live, *ws);                          // slot 0 cannot be read
+        mw->healthy(); mw->failOpenRead = { "0.patch" };
+        const auto openFail = open::patchBackupSave(0, *live, *ws);
+        mw->healthy();
+        bool ok = fail == open::Backup::kFailed && readFail == open::Backup::kFailed && openFail == open::Backup::kFailed && !open::backupAllowsEngineChange(fail)
+                  && !open::backupAllowsEngineChange(readFail) && !open::backupAllowsEngineChange(openFail) && !mw->files.count("0-b.patch") && mw->files["0.patch"] == kept;
+        const auto saved = open::patchBackupSave(0, *live, *ws);
+        ok = ok && saved == open::Backup::kSaved && open::backupAllowsEngineChange(saved) && mw->files["0-b.patch"] == kept;
+        mw->files.erase("0.patch");                                                          // no slot 0 file at all: nothing to keep, the change goes on
+        const auto none = open::patchBackupSave(0, *live, *ws);
+        mw->files["0.patch"] = {0xFF, 0xFF, 0xFF};                                           // a file that is no patch: nothing worth keeping either
+        const auto junk = open::patchBackupSave(0, *live, *ws);
+        ok = ok && none == open::Backup::kSkipped && junk == open::Backup::kSkipped && open::backupAllowsEngineChange(none) && open::backupAllowsEngineChange(junk);
+        ws->savePatch("0", *init);                                                           // an untouched Init is skipped
+        ok = ok && open::patchBackupSave(0, *live, *ws) == open::Backup::kSkipped && mw->files["0-b.patch"] == kept;
+        check(ok, "N3: a backup that cannot be written or read ends in kFailed and stops the engine change, no file or an Init is a skip");
+        // the engine change of the Model: a failed backup leaves the engine, the live patch and slot 0's file alone
+        live = setup(); mw->failReplace = true;
+        bool dirty = false; const auto before = mw->files["0.patch"];
+        auto changeEngine = [&]() { const auto bk = open::patchBackupSave(0, *live, *ws); return open::backupAllowsEngineChange(bk); };   // Synth::backupSlotZero's verdict
+        ok = !changeEngine() && mw->files["0.patch"] == before && raw(*live) == baseV;
+        mw->healthy(); ok = ok && changeEngine() && mw->files["0-b.patch"] == before;
+        check(ok, "N3: the engine change is refused while the backup fails and goes through when it works");
+        // N4: accept a library patch on a clean slot, its Workspace save fails: the part is dirty, a slot select does not discard it, a retry saves it
+        live = setup(); dirty = false;
+        live->setParamValue(0, edit0, Patch::ParamChangeSource::kKnob);                      // the accepted library patch (not dirty: loading never sets it)
+        auto saveOpen = [&]() { const bool s = open::patchSaveOpenSlot(0, *live, *ws); open::settleDirtyAfterSave(s, dirty); return s; };   // Synth::savePatchToWorkspace
+        auto selectSlot = [&](int slot) { if (dirty && !saveOpen()) return open::SlotSelect::kSaveFailed; return open::patchBankSelect(0, slot, *live, *ws); };   // Synth::selectPatchSlot
+        mw->failWrite = true; ok = !saveOpen() && dirty;                                    // the accept's save fails
+        ok = ok && selectSlot(1) == open::SlotSelect::kSaveFailed && open::patchBankCurrent(0) == 0 && raw(*live) == editedV;   // the slot select does not discard it
+        mw->healthy(); ok = ok && saveOpen() && !dirty && fileValues("0") == editedV;
+        dirty = true; mw->failReplace = true; ok = ok && !saveOpen() && dirty; mw->healthy(); ok = ok && saveOpen() && !dirty;   // a retry after another failure
+        check(ok, "N4: a failed save keeps the part dirty on every path, also for a clean slot, so a slot select retries the save instead of discarding the patch");
+      }
+      // S6: the data of a new patch comes from the engine definition, same bytes as a fresh OpenPatch gives, for every engine of the build
+      {
+        bool ok = true;
+        for (const auto& kd : kinds) {
+          auto p = ws->createPatch(int(kd.id)); auto& op = static_cast<open::OpenPatch&>(*p);
+          auto a = std::make_unique<open::PatchData>(), b = std::make_unique<open::PatchData>();
+          op.exportData(*a); open::initPatchData(*op.getDef(), *b);
+          std::vector<uint8_t> ea(open::kPatchFileMax), eb(open::kPatchFileMax);
+          const size_t na = open::encodePatch(*a, ea.data(), ea.size()), nb = open::encodePatch(*b, eb.data(), eb.size());
+          const bool same = na > 0 && na == nb && std::memcmp(ea.data(), eb.data(), na) == 0;
+          if (!same) printf("  S6: %s init data differs (%zu vs %zu bytes)\n", kd.name, na, nb);
+          ok = ok && same;
+        }
+        check(ok, "S6: initPatchData (no OpenPatch, no heap) encodes to the same bytes as a new patch of every engine");
       }
       // S1: a card read error is not the end of the file
       {
