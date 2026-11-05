@@ -311,11 +311,11 @@ const char* const fxDescriptions[FX_COUNT] = {
     "\n049: Min/1st  058: Min/2nd",
 #ifdef FEATURE_SYNTH_OPEN
     // Sequencer::strFxConsts::enFxType::FX_TYPE_PATCH_CHANGE,
-    "Destination: Synth \n\nSwitches the Synth instrument to another patch of its engine."
+    "Destination: Synth \n\nSwitches the Synth instrument to another patch slot of the project."
     "\n"
     "\n"
-    "The value is the number of the patch in the Patches folder of the engine, in alphabetical order, from 0 to 15."
-    " A number with no patch is ignored.",
+    "The value is the slot number from 0 to 15, as in the slot selector of the Synth screen. Slot 0 is the patch of the song."
+    " A slot with no patch of this engine is ignored.",
 #endif
     // Sequencer::strFxConsts::enFxType::FX_TYPE_BREAK_PATTERN,
     "Destination: Pattern \n\n"
