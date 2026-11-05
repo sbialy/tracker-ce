@@ -1065,6 +1065,23 @@ int main() {
         ok = ok && created == 1 && opens == 2;
         check(ok, "R3-B1: a bank copy that fails twice still loads the requested project, the empty project stays for a Workspace that cannot open");
       }
+      // R3-B3: the destination paths of the FileManager go up to PATCH_SIZE 255 (254 characters): replace and recovery work for them,
+      // the old 128 B buffer refused every path of 124 characters or more
+      {
+        bool ok = true;
+        for (size_t len : { size_t(123), size_t(124), size_t(160), size_t(250), size_t(254) }) {
+          std::string to = std::string(len - 11, 'd') + "\\0-15.patch";                    // len characters, ends like a slot file
+          ok = ok && to.size() == len;
+          RenameOps card; card.f[to] = "old"; card.f[to + ".tmp"] = "new";
+          ok = ok && open::replaceFileOps(card, (to + ".tmp").c_str(), to.c_str()) && card.f.size() == 1 && card.f[to] == "new";   // replaced, no .bak left
+          RenameOps cut; cut.f[to + ".bak"] = "old";                                                                                // an interrupted replace
+          ok = ok && open::recoverBackupOps(cut, to.c_str()) == open::Presence::kPresent && cut.f.size() == 1 && cut.f[to] == "old";
+        }
+        std::string over(300, 'x');                                                            // above anything the FileManager makes: refused, nothing touched
+        RenameOps card; card.f[over] = "old"; card.f[over + ".tmp"] = "new";
+        ok = ok && !open::replaceFileOps(card, (over + ".tmp").c_str(), over.c_str()) && card.f[over] == "old" && card.f.size() == 2;
+        check(ok, "R3-B3: replace and recovery work for destination paths up to 254 characters");
+      }
       // N1: replaceFileOps over a card with FatFs rename rules, any rename failing and the power going at any step. The old file is never lost:
       // after the reader's recovery the file is the old one or the new one, and a replace that said true leaves the new one
       {
