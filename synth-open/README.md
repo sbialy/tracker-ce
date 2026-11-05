@@ -217,10 +217,10 @@ OpenTracker's DIRT (drive and bitcrush, `opentracker-fx` `modules/dirt`) runs li
 
 | Entry | Shaper | Drive | Bits | Rate | Tone |
 |---|---|---|---|---|---|
-| Dirt Soft | rational tanh | 15 | 16 | 1 | off |
-| Dirt Hard | clip at +-1 | 15 | 16 | 1 | off |
-| Dirt Fold | triangle fold | 15 | 16 | 1 | off |
-| Dirt Asym | biased tanh, 10 Hz DC block | 15 | 16 | 1 | off |
+| Dirt Soft | rational tanh | 35 | 16 | 1 | off |
+| Dirt Hard | clip at +-1 | 35 | 16 | 1 | off |
+| Dirt Fold | triangle fold | 35 | 16 | 1 | off |
+| Dirt Asym | biased tanh, 10 Hz DC block | 35 | 16 | 1 | off |
 | Dirt Crush | rational tanh | 15 | 8 | 4 | 70 (about 5 kHz) |
 
 Mix is 100 % for all of them. Drive, Bits, Rate and Tone are the original's parameters and units (pre-gain 1 + 15 d^2 with d = Drive / 100, make-up gain 1 / (1 + 0.5 d)), so another preset is one line in `kPresets`. A project that uses a Dirt entry and is opened on a build without it falls back to Hard Clip (the existing range check in `fProjEdit.cpp`).

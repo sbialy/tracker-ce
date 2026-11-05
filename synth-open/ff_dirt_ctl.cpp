@@ -12,10 +12,10 @@ namespace ffdirt
 {
 
 const Preset kPresets[kPresetCount] = {
-    {kSoft, 15, 16, 1, 100, "Dirt Soft"},
-    {kHard, 15, 16, 1, 100, "Dirt Hard"},
-    {kFold, 15, 16, 1, 100, "Dirt Fold"},
-    {kAsym, 15, 16, 1, 100, "Dirt Asym"},
+    {kSoft, 35, 16, 1, 100, "Dirt Soft"},
+    {kHard, 35, 16, 1, 100, "Dirt Hard"},
+    {kFold, 35, 16, 1, 100, "Dirt Fold"},
+    {kAsym, 35, 16, 1, 100, "Dirt Asym"},
     {kSoft, 15, 8, 4, 70, "Dirt Crush"},
 };
 
