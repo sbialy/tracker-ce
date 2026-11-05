@@ -1065,6 +1065,48 @@ int main() {
         ok = ok && created == 1 && opens == 2;
         check(ok, "R3-B1: a bank copy that fails twice still loads the requested project, the empty project stays for a Workspace that cannot open");
       }
+      // R4: a failed bank copy at project open latches "bank copy incomplete" per part, and the next project save copies what the Workspace has
+      // and prunes nothing in Projects for that part. The latch ends at the next open that copies the part completely or at a new project
+      {
+        using Files = MemBankOps::Files;
+        const int P = open::kPatchBankParts;
+        Files project, work;
+        auto fill = [&]() {
+          project.clear(); work.clear();
+          for (int p = 0; p < P; p++) for (int s : { 0, 3, 5, 9, open::kBackupSlot }) project[open::bankFileName(p, s)] = { uint8_t(p), uint8_t(s) };
+          for (int p = 0; p < P; p++) project[open::bankFileName(p, open::kBackupSlot + 1)] = { uint8_t(p), 'n' };   // the .names file
+          work[open::bankFileName(0, 0)] = { 9, 9 };                                       // the Workspace still has an older slot 0
+        };
+        uint32_t latch = 0;
+        auto openCopy = [&](const char* failCopy) { MemBankOps o{ &project, &work, failCopy }; return open::copyBank(o, P, "S", "D", true, latch); };
+        auto saveCopy = [&](MemBankOps& o) { return open::copyBank(o, P, "S", "D", false, latch); };
+        fill();
+        bool ok = !openCopy("0-3.patch") && latch == 1u;                                  // the copy stops at slot 3 of part 0, parts 1.. were copied
+        ok = ok && !work.count("0-5.patch") && !work.count("0-b.patch") && work.count("1-5.patch");
+        const Files before = project;
+        MemBankOps sv{ &work, &project, "" };                                             // the save: Workspace -> Projects
+        ok = ok && saveCopy(sv) && sv.removed == 0 && project.count("0-3.patch") && project.count("0-5.patch") && project.count("0-9.patch")
+             && project.count("0-b.patch") && project.count("0.names") && project["0.patch"] == work["0.patch"];   // copied what exists, deleted nothing
+        ok = ok && latch == 1u;                                                           // a save does not clear it
+        ok = ok && saveCopy(sv) && sv.removed == 0 && project.count("0-5.patch");        // and a second save still keeps them
+        // the other parts are not affected: a slot the Workspace lacks is pruned as before
+        work.erase("1-5.patch"); ok = ok && saveCopy(sv) && !project.count("1-5.patch") && project.count("0-5.patch");
+        check(ok, "R4: after a failed open copy the save copies what the Workspace has and prunes nothing in Projects for that part");
+        // a later open that copies completely clears the latch, then the save prunes again
+        fill(); latch = 0; ok = !openCopy("0-3.patch") && latch == 1u;
+        ok = ok && openCopy("") && latch == 0u && work.count("0-5.patch");                // the retry of openProjectAfterBankCopy works
+        work.erase("0-5.patch"); MemBankOps sv2{ &work, &project, "" };
+        ok = ok && saveCopy(sv2) && !project.count("0-5.patch") && sv2.removed > 0;       // a complete Workspace prunes
+        // a part that fails twice stays latched across both attempts, a new project clears it
+        fill(); latch = 0; ok = ok && !openCopy("0-3.patch") && !openCopy("0-3.patch") && latch == 1u;
+        latch = 0;                                                                         // FileManager::createNewProjectInWorkspace
+        work.clear(); MemBankOps sv3{ &work, &project, "" };
+        ok = ok && saveCopy(sv3) && !project.count("0-5.patch");
+        // a failed lookup or copy during a guarded save is reported and still deletes nothing
+        fill(); latch = 0; ok = ok && !openCopy("0-3.patch"); MemBankOps sv4{ &work, &project, "0.patch" };
+        ok = ok && !saveCopy(sv4) && sv4.removed == 0 && project.count("0-5.patch") && project.count("0-b.patch") && latch == 1u;
+        check(ok, "R4: the latch ends at a complete open copy or a new project, never at a save, and a failing guarded save deletes nothing");
+      }
       // R3-B3: the destination paths of the FileManager go up to PATCH_SIZE 255 (254 characters): replace and recovery work for them,
       // the old 128 B buffer refused every path of 124 characters or more
       {

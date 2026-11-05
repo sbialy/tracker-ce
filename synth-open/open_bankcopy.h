@@ -31,8 +31,10 @@ inline std::string bankFileName(int part, int index)
 // but only after every copy worked and only when the destination's own state is known. Slot 0 is never removed (stock firmware knows
 // only that file). False: some file could not be copied or removed, or the card could not say, the caller reports it and nothing has been
 // removed on a guess. The files that were not touched are as they were.
+// `prune` false: copy what the source has and delete nothing (the source is a Workspace that may lack files only because an earlier copy
+// into it failed, see copyBank).
 template <class Ops>
-bool copyPartBank(Ops& ops, int part, const std::string& srcDir, const std::string& dstDir)
+bool copyPartBank(Ops& ops, int part, const std::string& srcDir, const std::string& dstDir, bool prune = true)
 {
     static_assert(kBankFiles <= 32, "one bit per file");
     uint32_t absent = 0;
@@ -74,7 +76,7 @@ bool copyPartBank(Ops& ops, int part, const std::string& srcDir, const std::stri
             return false;
         }
     }
-    for (int i = 1; i < kBankFiles; i++)
+    for (int i = 1; prune && i < kBankFiles; i++)
     {
         if (!(absent & (1u << i)))
         {
@@ -92,6 +94,30 @@ bool copyPartBank(Ops& ops, int part, const std::string& srcDir, const std::stri
         }
     }
     return true;
+}
+
+// The bank copy of all `parts` parts, with the per-session "bank copy incomplete" latch `incomplete` (one bit per part, main thread only).
+// `projectOpen` (project folder -> Workspace): the latch of each part is set when its copy failed and cleared when it worked, so the
+// latch always describes the last open. Otherwise (project save, Workspace -> project folder): a part whose latch is set may lack slot
+// files in the Workspace only because the open copy failed, the card still has them in Projects, so that part is copied and nothing is
+// pruned in Projects. The latch is not cleared by a save: a save to another folder (save as) says nothing about the opened project,
+// it is cleared by the next project open that copies the part completely or by a new project (clearAll). Returns false when any part's
+// copy failed.
+template <class Ops>
+bool copyBank(Ops& ops, int parts, const std::string& srcDir, const std::string& dstDir, bool projectOpen, uint32_t& incomplete)
+{
+    bool all = true;
+    for (int part = 0; part < parts; part++)
+    {
+        const uint32_t bit = 1u << part;
+        const bool ok = copyPartBank(ops, part, srcDir, dstDir, projectOpen || !(incomplete & bit));
+        if (projectOpen)
+        {
+            incomplete = ok ? (incomplete & ~bit) : (incomplete | bit);
+        }
+        all = ok && all;
+    }
+    return all;
 }
 
 // Project open, after the project's own files are in the Workspace: copies the patch bank, then loads the requested project.

@@ -737,7 +737,7 @@ struct BankCopyOps
 } // namespace
 #endif
 
-bool Synth::copyWorkspacePatches(const char* sourceProjectPath, const char* destinationProjectPath)
+bool Synth::copyWorkspacePatches(const char* sourceProjectPath, const char* destinationProjectPath, bool projectOpen)
 {
 #ifdef FEATURE_SYNTH_OPEN
     // The bank of each part: slot 0 is <P>.patch (all stock firmware knows), slot n > 0 is <P>-n.patch, then the slot 0 backup of an
@@ -746,12 +746,8 @@ bool Synth::copyWorkspacePatches(const char* sourceProjectPath, const char* dest
     const std::string srcDir = sourceProjectPath;
     const std::string dstDir = destinationProjectPath;
     BankCopyOps ops{ filesystem };
-    bool allCopied = true;
-    for (int part = 0; part < kSynthParts; part++)
-    {
-        allCopied = polysynth::open::copyPartBank(ops, part, srcDir, dstDir) && allCopied;
-    }
-    return allCopied;
+    // After a failed open copy the Workspace may lack files the project has: the save then deletes nothing in the project folder (copyBank).
+    return polysynth::open::copyBank(ops, kSynthParts, srcDir, dstDir, projectOpen, bankCopyIncomplete);
 #else
     for (int part = 0; part < kSynthParts; part++)
     {
