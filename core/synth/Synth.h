@@ -104,7 +104,9 @@ class Synth
     // False: the patch could not be written, the part stays dirty. The caller reports it and does not go on with what needed the file.
     bool savePatchToWorkspace(int part);
     bool saveDirtyWorkspacePatches();
-    void copyWorkspacePatches(const char* sourceProjectPath, const char* destinationProjectPath);
+    // False: a file could not be copied or removed (SYNTH_OPEN: the files already in the destination are as they were, or complete
+    // copies). The caller reports it and does not call the project saved or loaded.
+    bool copyWorkspacePatches(const char* sourceProjectPath, const char* destinationProjectPath);
     void setPatchDirty(int part) { parts[part].patchDirty = true; };
     bool isAnyPatchDirty();
 

@@ -535,7 +535,16 @@ void ProjectSave::saveProjectFinish()
              newFileManager.getCurrentProjectPath(),
              newFileManager.getCurrentProjectName());
 
+#ifdef FEATURE_SYNTH_OPEN
+    if (!newFileManager.getSynth()->copyWorkspacePatches(cWorkspacePath, destFilePath))
+    {
+        mtProject.values.projectNotSavedFlag |= 1; // the patch files in the project folder are not all current
+        operationError();
+        return;
+    }
+#else
     newFileManager.getSynth()->copyWorkspacePatches(cWorkspacePath, destFilePath);
+#endif
 #endif
 
     //-----------------------------------

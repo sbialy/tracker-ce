@@ -355,7 +355,15 @@ void ProjectOpen::openProjectFinish()
              newFileManager.getCurrentProjectPath(),
              newFileManager.getCurrentProjectName());
 
+#ifdef FEATURE_SYNTH_OPEN
+    if (!newFileManager.getSynth()->copyWorkspacePatches(srcFilePath, cWorkspacePath))
+    {
+        operationError(); // the project is not loaded with half its patch files
+        return;
+    }
+#else
     newFileManager.getSynth()->copyWorkspacePatches(srcFilePath, cWorkspacePath);
+#endif
 #endif
 
     //-----------------------------------

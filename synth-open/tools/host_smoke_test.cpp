@@ -13,6 +13,7 @@
 // per-instrument cap, a simulated overload (block cycles) makes the governor cut with hold-off, calm blocks restore one voice
 // at a time, Stop and offline render reset it (they use the first engine of the set and 2 voices per instrument, so a set that starts with PERC, 1 voice, fails them: the canonical order puts PERC after WTFM, only PERC alone starts with it). Then .patch save/load on an in-memory file system (all picked engines, then references to an engine this build lacks fall back safely).
 #include "open_load.h"
+#include "open_bankcopy.h"
 #include "open_patchdata.h"
 #include "open_patch.h"
 #include "PolySynth/FileSystem.h"
@@ -84,6 +85,21 @@ struct MemFS : FileSystem {
   bool failOpenWrite = false, failWrite = false, failReplace = false;
   std::function<void(const std::string&)> onRead, onWrite;
   void healthy() { failOpenWrite = failWrite = failReplace = false; onRead = nullptr; onWrite = nullptr; }
+};
+// The card operations of the bank copy (Synth::copyWorkspacePatches) over two in-memory folders: paths "S\\name" are the source folder, "D\\name" the destination.
+struct MemBankOps {
+  using Files = std::map<std::string, std::vector<uint8_t>>;
+  Files* src; Files* dst; std::string failCopy;       // failCopy: the copy of this file fails (the destination keeps what it had)
+  bool readable = true, failRemove = false; int removed = 0;
+  Files& mapOf(const std::string& p) { return p[0] == 'S' ? *src : *dst; }
+  static std::string base(const std::string& p) { return p.substr(2); }
+  open::CopyResult copy(const std::string& a, const std::string& b) {
+    auto it = mapOf(a).find(base(a)); if (it == mapOf(a).end()) return open::CopyResult::kAbsent;
+    if (base(b) == failCopy) return open::CopyResult::kFailed;
+    mapOf(b)[base(b)] = it->second; return open::CopyResult::kCopied; }
+  bool exists(const std::string& p) { return mapOf(p).count(base(p)) > 0; }
+  bool remove(const std::string& p) { if (failRemove) return false; removed++; return mapOf(p).erase(base(p)) > 0; }
+  bool sourceReadable() { return readable; }
 };
 // A short heap, as on the device after a while: nothrow new (what the patch store and bank use) fails above gShortHeap bytes (0: off)
 static size_t gShortHeap = 0;
@@ -644,13 +660,10 @@ int main() {
       // save: Workspace -> project, open: project -> a Workspace that still holds another project's files (slot 15 and names pruned)
       std::map<std::string, std::vector<uint8_t>> project = mw->files;
       mw->files.clear(); mw->files["0-15.patch"] = {1, 2, 3}; mw->files["1.names"] = {'x'};
-      auto copyPart = [&](int pt) {
-        for (int sl = 0; sl < open::kPatchBankSlots; sl++) { const std::string f = nameOf(pt, sl) + ".patch";
-          if (project.count(f)) mw->files[f] = project[f]; else if (sl > 0) mw->files.erase(f); }
-        const std::string nf = nameOf(pt, 0) + open::kSlotNamesExt;
-        if (project.count(nf)) mw->files[nf] = project[nf]; else mw->files.erase(nf); };
-      for (int pt = 0; pt < open::kPatchBankParts; pt++) copyPart(pt);
-      bool cyc = mw->files == project;
+      MemBankOps bankOps{ &project, &mw->files, "" };
+      bool cyc = true;
+      for (int pt = 0; pt < open::kPatchBankParts; pt++) cyc = cyc && open::copyPartBank(bankOps, pt, "S", "D");   // Synth::copyWorkspacePatches
+      cyc = cyc && mw->files == project;
       std::unique_ptr<Patch> live[open::kPatchBankParts];
       for (int pt = 0; pt < open::kPatchBankParts; pt++) {
         live[pt] = ws->createPatch(int(k.id));
@@ -982,6 +995,24 @@ int main() {
         ok = !ws->savePatch("0-1", *base) && mw->files["0-1.patch"] == keep && !ws->savePatch("newname", *base) && !mw->files.count("newname.patch");
         mw->healthy();
         check(ok, "B4: a library or Workspace save that fails keeps the old file and makes no new one");
+      }
+      // B5: the bank copy replaces a file only with a complete copy, deletes nothing before every copy worked, and fails loudly
+      {
+        MemBankOps::Files S, D;
+        auto reset = [&]() { S.clear(); D.clear();
+          S["0.patch"] = {1}; S["0-1.patch"] = {2}; S["0-2.patch"] = {3}; S["0.names"] = {9};
+          D["0.patch"] = {10}; D["0-1.patch"] = {11}; D["0-2.patch"] = {12}; D["0-5.patch"] = {15}; D["0-b.patch"] = {16}; D["0.names"] = {19}; };
+        reset(); MemBankOps ops{ &S, &D, "0-2.patch" };
+        bool ok = !open::copyPartBank(ops, 0, "S", "D") && D["0-2.patch"] == std::vector<uint8_t>{12} && D.count("0-5.patch") && D.count("0-b.patch") && ops.removed == 0;   // a failed copy: no file lost
+        reset(); ops.failCopy = ""; ops.readable = false;
+        ok = ok && !open::copyPartBank(ops, 0, "S", "D") && D.count("0-5.patch") && D.count("0-b.patch") && ops.removed == 0;   // "absent" on an unreadable source: nothing removed
+        reset(); ops.readable = true; ops.failRemove = true;
+        ok = ok && !open::copyPartBank(ops, 0, "S", "D") && D["0-1.patch"] == std::vector<uint8_t>{2};                           // a remove that fails is reported
+        reset(); ops.failRemove = false;
+        ok = ok && open::copyPartBank(ops, 0, "S", "D") && D["0-2.patch"] == std::vector<uint8_t>{3} && !D.count("0-5.patch") && !D.count("0-b.patch") && D["0.names"] == std::vector<uint8_t>{9};
+        reset(); S.erase("0.patch"); S.erase("0.names");
+        ok = ok && open::copyPartBank(ops, 0, "S", "D") && D["0.patch"] == std::vector<uint8_t>{10} && !D.count("0.names");       // slot 0 is never removed, the names file is
+        check(ok, "B5: a failed bank copy reports it and deletes nothing, a good one replaces the files and prunes the slots the source lacks");
       }
       check(mw->openNow == 0, "review blockers: every file opened is closed again");
       open::patchBankSetLive(0, nullptr);

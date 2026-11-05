@@ -29,6 +29,7 @@
 #include "mtStructs.h"
 #include <numeric>
 #ifdef FEATURE_SYNTH_OPEN
+#include "open_bankcopy.h"
 #include "open_load.h"
 #endif
 
@@ -681,55 +682,68 @@ void Synth::triggerTestNote(int part, int note, bool noteOn)
     ENABLE_AUDIO_INTERRUPTS();
 }
 
-void Synth::copyWorkspacePatches(const char* sourceProjectPath, const char* destinationProjectPath)
+#ifdef FEATURE_SYNTH_OPEN
+namespace
 {
+// The card operations of the bank copy (open_bankcopy.h). A file is copied to <dst>.tmp and replaces the destination only when it is
+// complete, so an SD error leaves the destination file as it was.
+struct BankCopyOps
+{
+    FileSystem* fs;
+    const std::string& srcDir;
+
+    polysynth::open::CopyResult copy(const std::string& src, const std::string& dst)
+    {
+        using polysynth::open::CopyResult;
+        if (!fs->exists(src.c_str()))
+        {
+            return CopyResult::kAbsent;
+        }
+        const std::string tmp = dst + ".tmp";
+        if (!cFileTransfer::copyFile(fs, src.c_str(), tmp.c_str())) // it deletes tmp itself when it fails
+        {
+            return CopyResult::kFailed;
+        }
+        if (!FileSystemAdapter::replaceFile(fs, tmp.c_str(), dst.c_str()))
+        {
+            fs->remove(tmp.c_str());
+            return CopyResult::kFailed;
+        }
+        return CopyResult::kCopied;
+    }
+    bool exists(const std::string& path) { return fs->exists(path.c_str()); }
+    bool remove(const std::string& path) { return fs->remove(path.c_str()); }
+    bool sourceReadable() { return fs->exists(srcDir.c_str()); }
+};
+} // namespace
+#endif
+
+bool Synth::copyWorkspacePatches(const char* sourceProjectPath, const char* destinationProjectPath)
+{
+#ifdef FEATURE_SYNTH_OPEN
+    // The bank of each part: slot 0 is <P>.patch (all stock firmware knows), slot n > 0 is <P>-n.patch, then the slot 0 backup of an
+    // engine change (<P>-b.patch) and the slot names (<P>.names). A file the source has replaces the destination's whole or not at all,
+    // a file it does not have is removed from the destination (a slot never survives from another project) once every copy worked.
+    const std::string srcDir = sourceProjectPath;
+    const std::string dstDir = destinationProjectPath;
+    BankCopyOps ops{ filesystem, srcDir };
+    bool allCopied = true;
     for (int part = 0; part < kSynthParts; part++)
     {
-#ifdef FEATURE_SYNTH_OPEN
-        // slot 0 is <P>.patch (all stock firmware knows), slot n > 0 is <P>-n.patch. A slot file the source does not have is
-        // removed from the destination, so a slot never survives from another project. The slot 0 backup of an engine change
-        // (<P>-b.patch) goes the same way.
-        for (int slot = 0; slot <= polysynth::open::kBackupSlot; slot++) // the slots, then the slot 0 backup
-        {
-            char name[8];
-            polysynth::open::patchSlotName(part, slot, name);
-            std::string srcFile =
-              fmt::format("{}\\{}{}", sourceProjectPath, name, polysynth::PatchStore::kFileExtension);
-            std::string dstFile =
-              fmt::format("{}\\{}{}", destinationProjectPath, name, polysynth::PatchStore::kFileExtension);
-            if (slot > 0 && !filesystem->exists(srcFile.c_str()))
-            {
-                if (filesystem->exists(dstFile.c_str()))
-                {
-                    filesystem->remove(dstFile.c_str());
-                }
-                continue;
-            }
-            cFileTransfer::copyFile(filesystem, srcFile.c_str(), dstFile.c_str());
-        }
-        // the slot names of the part (<P>.names), carried and pruned like a slot file
-        {
-            char name[8];
-            polysynth::open::patchSlotName(part, 0, name);
-            std::string srcFile = fmt::format("{}\\{}{}", sourceProjectPath, name, polysynth::open::kSlotNamesExt);
-            std::string dstFile = fmt::format("{}\\{}{}", destinationProjectPath, name, polysynth::open::kSlotNamesExt);
-            if (filesystem->exists(srcFile.c_str()))
-            {
-                cFileTransfer::copyFile(filesystem, srcFile.c_str(), dstFile.c_str());
-            }
-            else if (filesystem->exists(dstFile.c_str()))
-            {
-                filesystem->remove(dstFile.c_str());
-            }
-        }
+        allCopied = polysynth::open::copyPartBank(ops, part, srcDir, dstDir) && allCopied;
+    }
+    return allCopied;
 #else
+    for (int part = 0; part < kSynthParts; part++)
+    {
         std::string srcFile =
           fmt::format("{}\\{}{}", sourceProjectPath, part, polysynth::PatchStore::kFileExtension);
         std::string dstFile = fmt::format(
           "{}\\{}{}", destinationProjectPath, part, polysynth::PatchStore::kFileExtension);
         cFileTransfer::copyFile(filesystem, srcFile.c_str(), dstFile.c_str());
-#endif
     }
+    return true;
+#endif
 }
 
 bool Synth::isAnyPatchDirty()
