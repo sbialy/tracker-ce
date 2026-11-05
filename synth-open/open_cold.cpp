@@ -864,7 +864,11 @@ bool partOk(int part)
 
 void patchSlotName(int part, int slot, char (&out)[8])
 {
-    if (slot > 0)
+    if (slot == kBackupSlot)
+    {
+        snprintf(out, sizeof(out), "%d-b", part);
+    }
+    else if (slot > 0)
     {
         snprintf(out, sizeof(out), "%d-%d", part, slot);
     }
@@ -1098,6 +1102,87 @@ bool patchBankRevert(int part, Patch& patch, PatchStore& workspace)
     OPEN_LOCK_AUDIO();
     op.importData(sc.data());
     OPEN_UNLOCK_AUDIO();
+    return true;
+}
+
+namespace
+{
+// A file of the part in the Workspace ("P.patch", "P-b.patch"), read into the scratch buffer and decoded into the scratch data. Its size,
+// 0 when it is missing, damaged, bigger than a patch file may be or of another engine than `typeId`.
+size_t readPartFile(OpenPatchStore& st, int part, int slot, int typeId, ScratchLease& sc)
+{
+    char base[8];
+    patchSlotName(part, slot, base);
+    const size_t n = st.readRaw(std::string(base) + ".patch", sc.buf(), kPatchFileMax + 1);
+    if (n == 0 || n > kPatchFileMax)
+    {
+        return 0;
+    }
+    return decodePatch(sc.buf(), n, sc.data()) && typeForEngineId(sc.data().engine) == typeId ? n : 0;
+}
+} // namespace
+
+Backup patchBackupSave(int part, Patch& live, PatchStore& workspace)
+{
+    if (!partOk(part))
+    {
+        return Backup::kFailed;
+    }
+    OpenPatchStore& st = static_cast<OpenPatchStore&>(workspace);
+    const int typeId = static_cast<OpenPatch&>(live).typeId();
+    ScratchLease sc;
+    if (!sc)
+    {
+        return Backup::kFailed;
+    }
+    const size_t n = readPartFile(st, part, 0, typeId, sc);
+    if (n == 0)
+    {
+        return Backup::kFailed;
+    }
+    // An untouched Init is not worth a backup: it would push out the patch of an engine the part had before (A -> B -> C -> A).
+    // Untouched = the very bytes a new patch of the engine is written as. The file is at most half the buffer then, the new patch
+    // is encoded into the other half.
+    constexpr size_t kHalf = kPatchFileMax / 2;
+    if (n <= kHalf)
+    {
+        const auto init = st.createPatch(typeId);
+        static_cast<OpenPatch&>(*init).exportData(sc.data());
+        const size_t m = encodePatch(sc.data(), sc.buf() + kHalf, kHalf);
+        if (m == n && std::memcmp(sc.buf(), sc.buf() + kHalf, n) == 0)
+        {
+            return Backup::kSkipped;
+        }
+    }
+    char base[8];
+    patchSlotName(part, kBackupSlot, base);
+    return st.writeRaw(std::string(base) + ".patch", sc.buf(), n) ? Backup::kSaved : Backup::kFailed;
+}
+
+bool patchBackupRestore(int part, Patch& live, PatchStore& workspace)
+{
+    if (!partOk(part))
+    {
+        return false;
+    }
+    OpenPatchStore& st = static_cast<OpenPatchStore&>(workspace);
+    OpenPatch& op = static_cast<OpenPatch&>(live);
+    ScratchLease sc;
+    if (!sc)
+    {
+        return false;
+    }
+    const size_t n = readPartFile(st, part, kBackupSlot, op.typeId(), sc);
+    char base[8];
+    patchSlotName(part, 0, base);
+    if (n == 0 || !st.writeRaw(std::string(base) + ".patch", sc.buf(), n))
+    {
+        return false;
+    }
+    OPEN_LOCK_AUDIO();
+    op.importData(sc.data());
+    OPEN_UNLOCK_AUDIO();
+    patchBankCommit(part);
     return true;
 }
 

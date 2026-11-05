@@ -465,8 +465,10 @@ void cInstrumentEditor::changeSynthModel(int16_t value)
 
 #ifdef FEATURE_SYNTH_OPEN
     // An engine change keeps the slot files of the old engine (see Synth::setInstrumentType): an edited slot 1..15 is
-    // written before the engine goes, slot 0 is replaced by the new Init patch as it always was
+    // written before the engine goes. Slot 0 is replaced by the new Init patch as it always was, but its file is kept first as
+    // the one backup of the part (<P>-b.patch), and it comes back as slot 0 when the part returns to an engine the backup is of.
     synth->flushPatchSlot(syntPartIdx);
+    synth->backupSlotZero(syntPartIdx, mtProject.values.synthPart[syntPartIdx].patchName);
 #endif
     synth->setInstrumentType(syntPartIdx, Synth::kSynthTypes.at(newUi));
 
@@ -474,7 +476,11 @@ void cInstrumentEditor::changeSynthModel(int16_t value)
 
     showSynthModel(syntPartIdx);
 
+#ifdef FEATURE_SYNTH_OPEN
+    initCurrentPatch(synth->restoreSlotZeroBackup(syntPartIdx));
+#else
     initCurrentPatch();
+#endif
     lightUpPadBoard();
     newFileManager.setProjectStructChanged();
 }
@@ -838,12 +844,15 @@ void cInstrumentEditor::revertPatch()
 #endif
 }
 
-void cInstrumentEditor::initCurrentPatch()
+void cInstrumentEditor::initCurrentPatch(bool backupRestored)
 {
     int syntPartIdx = mtProject.values.lastUsedInstrument - SYNTH_INSTRUMENTS_START_IDX;
     assert(syntPartIdx >= 0 && syntPartIdx < kSynthInstrumentsCount);
 
-    IE->getSynth()->initPatch(syntPartIdx);
+    if (!backupRestored)
+    {
+        IE->getSynth()->initPatch(syntPartIdx);
+    }
 
     IE->getSynth()->initSynthPartMacrosValues(syntPartIdx, mtProject.values.synthPart[syntPartIdx]);
     engine.refreshSynthInstrumentParams(mtProject.values.synthPart[syntPartIdx], syntPartIdx);
@@ -862,7 +871,7 @@ void cInstrumentEditor::initCurrentPatch()
 
     newFileManager.setProjectStructChanged();
 
-    mtPopups.show(0, "Init patch loaded");
+    mtPopups.show(0, backupRestored ? "Previous patch restored" : "Init patch loaded");
 
     IE->showSynthPatchName(syntPartIdx);
 }

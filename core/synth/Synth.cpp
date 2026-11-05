@@ -253,14 +253,24 @@ bool Synth::loadPatchFromWorkspace(int part, std::optional<std::string> override
 }
 
 #ifdef FEATURE_SYNTH_OPEN
-void Synth::reloadPatchBank(int part)
+void Synth::reloadPatchBank(int part, bool keepNames)
 {
     static_assert(kSynthParts <= polysynth::open::kPatchBankParts, "one patch bank per synth part");
     assert(part < kSynthParts);
 
-    for (auto& name : parts[part].slotNames)
+    if (keepNames)
     {
-        name.clear();
+        // Engine change: the slot files 1..15 of the old engine stay on disk and so do their names (an autosave would write an
+        // empty <P>.names otherwise and the names would be gone when the part is switched back). Slot 0 is the new Init.
+        parts[part].slotNames[0].clear();
+    }
+    else
+    {
+        for (auto& name : parts[part].slotNames)
+        {
+            name.clear();
+        }
+        parts[part].backupName.clear();
     }
     if (parts[part].patch && patchStoreWorkspace)
     {
@@ -281,6 +291,7 @@ void Synth::loadSlotNames(int part)
     {
         parts[part].slotNames[slot] = names->name[slot];
     }
+    parts[part].backupName = names->name[0];
 }
 
 void Synth::persistSlotNames(int part)
@@ -291,6 +302,7 @@ void Synth::persistSlotNames(int part)
         return; // heap short: the file keeps the names it had
     }
     const int cur = getPatchSlot(part);
+    snprintf(names->name[0], sizeof(names->name[0]), "%s", parts[part].backupName.c_str());
     for (int slot = 1; slot < kPatchSlots; slot++)
     {
         const std::string& name = slot == cur ? parts[part].patchName : parts[part].slotNames[slot];
@@ -300,6 +312,30 @@ void Synth::persistSlotNames(int part)
         }
     }
     polysynth::open::patchNamesWrite(part, *patchStoreWorkspace, *names);
+}
+
+void Synth::backupSlotZero(int part, const char* slotZeroName)
+{
+    if (parts[part].patchDirty)
+    {
+        savePatchToWorkspace(part); // the edits of the open slot are in its file before slot 0's file is copied
+    }
+    if (polysynth::open::patchBackupSave(part, *parts[part].patch, *patchStoreWorkspace) == polysynth::open::Backup::kSaved)
+    {
+        parts[part].backupName = slotZeroName;
+        persistSlotNames(part);
+    }
+}
+
+bool Synth::restoreSlotZeroBackup(int part)
+{
+    if (!polysynth::open::patchBackupRestore(part, *parts[part].patch, *patchStoreWorkspace))
+    {
+        return false;
+    }
+    parts[part].patchName = parts[part].backupName.empty() ? "Unnamed" : parts[part].backupName;
+    parts[part].patchDirty = false;
+    return true;
 }
 
 bool Synth::applyPatchBankSlot(int part, int slot)
@@ -432,9 +468,10 @@ void Synth::setInstrumentType(int partIdx, polysynth::InstrumentTypeId typeId)
         part.instrument->assignPatch(part.patch);
         ENABLE_AUDIO_INTERRUPTS();
 #ifdef FEATURE_SYNTH_OPEN
-        // The new engine starts on slot 0 (the Init patch). The slot files 1..15 of the old engine stay on disk and
-        // in the project, they are ignored (and cannot be opened) until the part is switched back to their engine.
-        reloadPatchBank(partIdx);
+        // The new engine starts on slot 0 (the Init patch, or the slot 0 backup when the editor restores it). The slot files 1..15 of
+        // the old engine stay on disk and in the project with their names, they are ignored (and cannot be opened) until the part is
+        // switched back to their engine.
+        reloadPatchBank(partIdx, true);
 #endif
     }
 }
@@ -642,8 +679,9 @@ void Synth::copyWorkspacePatches(const char* sourceProjectPath, const char* dest
     {
 #ifdef FEATURE_SYNTH_OPEN
         // slot 0 is <P>.patch (all stock firmware knows), slot n > 0 is <P>-n.patch. A slot file the source does not have is
-        // removed from the destination, so a slot never survives from another project.
-        for (int slot = 0; slot < kPatchSlots; slot++)
+        // removed from the destination, so a slot never survives from another project. The slot 0 backup of an engine change
+        // (<P>-b.patch) goes the same way.
+        for (int slot = 0; slot <= polysynth::open::kBackupSlot; slot++) // the slots, then the slot 0 backup
         {
             char name[8];
             polysynth::open::patchSlotName(part, slot, name);

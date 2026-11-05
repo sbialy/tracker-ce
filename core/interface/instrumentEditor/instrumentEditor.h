@@ -419,7 +419,7 @@ class cInstrumentEditor : public ModuleBase
     bool browsePatchList();
     int loadPatchList();
     void revertPatch();
-    void initCurrentPatch();
+    void initCurrentPatch(bool backupRestored = false); // backupRestored: slot 0 already holds the restored backup, no Init is written
 
     void showSynthParamsScreen();
     void setSynthParamsScreenFunct();

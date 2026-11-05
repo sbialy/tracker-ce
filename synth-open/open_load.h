@@ -40,7 +40,10 @@ bool partIdle(int part);
 // for the FX. A slot file of another engine, a missing file or a damaged one is not in the bank.
 constexpr int kPatchBankSlots = 16;
 constexpr int kPatchBankParts = 3;
-// File name without folder and extension of slot `slot` of `part`: "P" for slot 0, "P-n" otherwise.
+// The slot 0 backup of an engine change is the 17th file of the part, "P-b" (patchSlotName(part, kBackupSlot)). It is not a slot: the
+// bank and the selector never see it, copyWorkspacePatches carries and prunes it like the slot files.
+constexpr int kBackupSlot = kPatchBankSlots;
+// File name without folder and extension of slot `slot` of `part`: "P" for slot 0, "P-n" otherwise, "P-b" for kBackupSlot.
 void patchSlotName(int part, int slot, char (&out)[8]);
 
 // Main thread, with audio interrupts DISABLED by the caller, in the same window that replaces the part's live Patch object (the old
@@ -58,6 +61,20 @@ void patchBankToSlotZero(int part);
 static_assert(kSlotNameSlots == kPatchBankSlots, "one name per slot");
 bool patchNamesRead(int part, PatchStore& workspace, SlotNames& out);
 bool patchNamesWrite(int part, PatchStore& workspace, const SlotNames& in);
+// Engine change, main thread, the old engine still live and its slot 0 file (<P>.patch) up to date: keeps that file as <P>-b.patch.
+// kSkipped: slot 0 is an untouched Init (the bytes of a new patch of the engine), an older backup stays. kFailed: there is no readable
+// slot 0 file of the live engine or the copy failed, an older backup stays.
+enum class Backup
+{
+    kFailed,
+    kSkipped,
+    kSaved,
+};
+Backup patchBackupSave(int part, Patch& live, PatchStore& workspace);
+// Engine change, main thread, after the new engine's Init patch is live and the bank was rebuilt for it: if <P>-b.patch is a file of
+// that engine (the engine field of the file decides, as for every slot file) it becomes slot 0: written to <P>.patch, loaded into the
+// live patch and the bank. False: nothing changed, the caller loads Init.
+bool patchBackupRestore(int part, Patch& live, PatchStore& workspace);
 // Main thread: if the FX replaced the live values, put the edited values of the open slot back (call before reading or
 // saving the live patch, and before any edit).
 void patchBankRestore(int part);

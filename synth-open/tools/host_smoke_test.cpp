@@ -553,10 +553,10 @@ int main() {
       auto decode = [](const std::vector<uint8_t>& v, open::SlotNames& n) { return open::decodeSlotNames(v.data(), v.size(), n); };
       open::SlotNames in; std::snprintf(in.name[1], sizeof(in.name[1]), "Warm Pad"); std::snprintf(in.name[12], sizeof(in.name[12]), "Bass 12");
       std::snprintf(in.name[15], sizeof(in.name[15]), "%s", "0123456789012345678901234567890"); // 31 bytes, the longest
-      std::snprintf(in.name[0], sizeof(in.name[0]), "slot0 is never stored");
+      // name[0] is the backup's name (b= line, tested with the slot 0 backup below), empty here: no line
       uint8_t buf[open::kSlotNamesFileMax]; const size_t n = open::encodeSlotNames(in, buf, sizeof(buf));
       const std::string text(reinterpret_cast<char*>(buf), n);
-      check(text == "tffnames 1\n1=Warm Pad\n12=Bass 12\n15=0123456789012345678901234567890\n", "slot names file: text header, one slot=name line per named slot 1..15, slot 0 left out");
+      check(text == "tffnames 1\n1=Warm Pad\n12=Bass 12\n15=0123456789012345678901234567890\n", "slot names file: text header, one slot=name line per named slot 1..15, no b= line without a backup");
       open::SlotNames out; const bool dec = open::decodeSlotNames(buf, n, out);
       bool same = dec; for (int sl = 1; sl < 16; sl++) same = same && std::strcmp(in.name[sl], out.name[sl]) == 0;
       check(same && out.name[0][0] == 0, "slot names file: encode then decode gives the same names (all 15 slots compared)");
@@ -660,6 +660,213 @@ int main() {
       for (int pt = 0; pt < open::kPatchBankParts; pt++) open::patchBankSetLive(pt, nullptr);
       mw->files.clear();
     }
+    // ---- slot 0 backup of an engine change (<P>-b.patch): the file functions of the shim, then (below) the whole change with real files
+    {
+      mw->files.clear(); mw->openNow = 0;
+      const int tA = int(kinds[0].id);
+      auto nameOf = [](int part, int slot) { char n[8]; open::patchSlotName(part, slot, n); return std::string(n); };
+      auto live = ws->createPatch(tA);
+      open::patchBankSetLive(0, live.get());
+      open::patchBankToSlotZero(0);
+      open::patchBankPreload(0, *live, *ws);
+      bool ok = nameOf(0, open::kBackupSlot) == "0-b" && nameOf(2, open::kBackupSlot) == "2-b" && nameOf(1, 15) == "1-15";
+      using BK = open::Backup;
+      ok = ok && open::patchBackupSave(0, *live, *ws) == BK::kFailed && mw->files.count("0-b.patch") == 0;            // no slot 0 file yet
+      ws->savePatch("0", *live);
+      ok = ok && open::patchBackupSave(0, *live, *ws) == BK::kSkipped && mw->files.count("0-b.patch") == 0;           // untouched Init: no backup
+      const auto& m0 = live->getMetadata(); const float v0 = *live->getParamValue(0), hi = float(m0.params[0].maxValue), lo = float(m0.params[0].minValue);
+      live->setParamValue(0, v0 == hi ? lo : hi, Patch::ParamChangeSource::kKnob);
+      ws->savePatch("0", *live);
+      ok = ok && open::patchBackupSave(0, *live, *ws) == BK::kSaved && mw->files["0-b.patch"] == mw->files["0.patch"];  // edited: byte copy
+      const auto kept = mw->files["0-b.patch"];
+      live->setParamValue(0, v0, Patch::ParamChangeSource::kKnob); ws->savePatch("0", *live);                          // slot 0 back to the Init values
+      ok = ok && open::patchBackupSave(0, *live, *ws) == BK::kSkipped && mw->files["0-b.patch"] == kept;                // an older backup stays
+      mw->files["0.patch"] = {1, 2, 3, 4};
+      ok = ok && open::patchBackupSave(0, *live, *ws) == BK::kFailed && mw->files["0-b.patch"] == kept;                 // damaged slot 0 file
+      mw->files["0.patch"].assign(9000, 7);
+      ok = ok && open::patchBackupSave(0, *live, *ws) == BK::kFailed && mw->files["0-b.patch"] == kept;                // over kPatchFileMax
+      check(ok, "slot 0 backup: an untouched Init, a damaged or missing slot 0 file leave the backup alone, an edited slot 0 is copied byte for byte");
+      // restore: the backup is of this engine -> slot 0 file, live patch and bank; foreign engine, damaged or missing -> nothing changes
+      ws->savePatch("0", *live);
+      auto fresh = ws->createPatch(tA);
+      bool rest = open::patchBackupRestore(0, *fresh, *ws) && mw->files["0.patch"] == kept && *fresh->getParamValue(0) == (v0 == hi ? lo : hi);
+      open::patchBankSetLive(0, fresh.get()); open::patchBankPreload(0, *fresh, *ws);
+      rest = rest && open::patchBankApply(0, 0);
+      if (nKinds > 1) {
+        const int tB = int(kinds[1].id); auto other = ws->createPatch(tB); const auto before = mw->files["0.patch"];
+        rest = rest && !open::patchBackupRestore(0, *other, *ws) && mw->files["0.patch"] == before;                  // the backup is of engine A
+      }
+      mw->files["0-b.patch"] = {9, 9, 9}; auto f2 = ws->createPatch(tA); const auto before2 = mw->files["0.patch"];
+      rest = rest && !open::patchBackupRestore(0, *f2, *ws) && mw->files["0.patch"] == before2;
+      mw->files.erase("0-b.patch");
+      rest = rest && !open::patchBackupRestore(0, *f2, *ws) && mw->files["0.patch"] == before2;
+      check(rest, "slot 0 backup: restore needs a backup of the engine (the file's engine field decides), else slot 0 and the live patch stay");
+      // no heap block over 512 B: backup and restore work through the SDRAM scratch
+      mw->files["0.patch"] = kept; mw->files.erase("0-b.patch");
+      gShortHeap = 512;
+      const bool small = open::patchBackupSave(0, *live, *ws) == BK::kSaved && open::patchBackupRestore(0, *fresh, *ws);
+      gShortHeap = 0;
+      check(small && mw->files["0-b.patch"] == kept, "slot 0 backup: with no heap block over 512 B backup and restore still work (scratch in SDRAM)");
+      check(mw->openNow == 0, "slot 0 backup: every file opened is closed again");
+      // names file: the backup's name is the line b=<name>
+      open::SlotNames in; std::snprintf(in.name[0], sizeof(in.name[0]), "Old Pad"); std::snprintf(in.name[3], sizeof(in.name[3]), "Three");
+      uint8_t buf[open::kSlotNamesFileMax]; const size_t n = open::encodeSlotNames(in, buf, sizeof(buf));
+      const std::string text(buf, buf + n);
+      open::SlotNames out; const bool dec = open::decodeSlotNames(buf, n, out);
+      open::SlotNames only; std::snprintf(only.name[0], sizeof(only.name[0]), "x");
+      open::SlotNames d2;
+      bool cod = text == "tffnames 1\nb=Old Pad\n3=Three\n" && dec && std::strcmp(out.name[0], "Old Pad") == 0 && std::strcmp(out.name[3], "Three") == 0 && open::anySlotName(only);
+      const std::string junk = "tffnames 1\nb=\nb\nbb=x\n0=zero\nb=ok\n";
+      cod = cod && open::decodeSlotNames(reinterpret_cast<const uint8_t*>(junk.data()), junk.size(), d2) && std::strcmp(d2.name[0], "ok") == 0 && d2.name[1][0] == 0;
+      cod = cod && open::encodeSlotNames(in, buf, 16) == 0;                                                     // too small for the b= line
+      std::memset(in.name[0], 'z', open::kSlotNameMax); for (int sl = 1; sl < 16; sl++) std::memset(in.name[sl], 'x', open::kSlotNameMax);
+      cod = cod && open::encodeSlotNames(in, buf, sizeof(buf)) <= open::kSlotNamesFileMax && open::encodeSlotNames(in, buf, sizeof(buf)) > 500;
+      check(cod, "slot names file: b=<name> carries the backup's name, slot 0 lines stay refused, the biggest file with a backup name still fits");
+      open::patchBankSetLive(0, nullptr);
+      mw->files.clear();
+    }
+#if defined(SMOKE_FIXTURES) && defined(SYNTH_ENGINE_VAP)
+    // ---- the whole engine change with the real files of the device (project "OT Test 07 - VAP Only": VAP slot 0 and slots 1..3 named
+    // Brass Tacks, M1 Organ, Ratio). The Model below mirrors, step for step, what Synth::backupSlotZero / setInstrumentType /
+    // reloadPatchBank(keepNames) / restoreSlotZeroBackup / persistSlotNames / selectPatchSlot do around the shim calls (core Synth.cpp
+    // is not compiled here): same calls in the same order, the names kept in the same places.
+    {
+      const int tV = int(InstrumentTypeId::kVASynth);
+      int others[2] = { -1, -1 }, no = 0;
+      for (const auto& kd : kinds) if (int(kd.id) != tV && no < 2) others[no++] = int(kd.id);
+      auto nameOf = [](int part, int slot) { char n[8]; open::patchSlotName(part, slot, n); return std::string(n); };
+      std::map<std::string, std::vector<uint8_t>> fixture;
+      bool read = true;
+      for (const char* f : {"0.patch", "0-1.patch", "0-2.patch", "0-3.patch", "0.names"}) {
+        FILE* fp = std::fopen((std::string(SMOKE_FIXTURES) + "/ot-test-07/" + f).c_str(), "rb"); read = read && fp; if (!fp) continue;
+        uint8_t b[4096]; size_t got; while ((got = std::fread(b, 1, sizeof(b), fp)) > 0) fixture[f].insert(fixture[f].end(), b, b + got);
+        std::fclose(fp);
+      }
+      check(read && no == 2, "engine change: fixtures read and the build has two engines besides VAP");
+      struct Model {
+        std::unique_ptr<Patch> live; int type = 0; std::string name, projName, slotNames[16], backupName; bool dirty = false;
+      } m;
+      auto savePart = [&]() {                                           // Synth::savePatchToWorkspace
+        open::patchBankRestore(0); ws->savePatch(nameOf(0, open::patchBankCurrent(0)), *m.live); open::patchBankCommit(0); m.dirty = false; };
+      auto persist = [&]() {                                            // Synth::persistSlotNames
+        open::SlotNames nm; std::snprintf(nm.name[0], sizeof(nm.name[0]), "%s", m.backupName.c_str());
+        const int cur = open::patchBankCurrent(0);
+        for (int sl = 1; sl < 16; sl++) { const std::string& s = sl == cur ? m.name : m.slotNames[sl]; if (s != "Unnamed") std::snprintf(nm.name[sl], sizeof(nm.name[sl]), "%s", s.c_str()); }
+        open::patchNamesWrite(0, *ws, nm); };
+      auto openProject = [&](const std::map<std::string, std::vector<uint8_t>>& project, int type, const char* slot0Name) {   // project open: copyWorkspacePatches, load path
+        for (int sl = 0; sl <= open::kBackupSlot; sl++) { const std::string f = nameOf(0, sl) + ".patch";
+          if (project.count(f)) mw->files[f] = project.at(f); else if (sl > 0) mw->files.erase(f); }
+        if (project.count("0.names")) mw->files["0.names"] = project.at("0.names"); else mw->files.erase("0.names");
+        m.type = type; m.live = ws->createPatch(type); open::patchBankSetLive(0, m.live.get());
+        for (auto& s : m.slotNames) s.clear(); m.backupName.clear();
+        open::patchBankPreload(0, *m.live, *ws);                                    // Synth::setInstrumentType
+        open::patchBankToSlotZero(0);                                               // Synth::loadPatchFromWorkspace
+        const bool loaded = ws->loadPatch("0", *m.live, true);
+        open::patchBankPreload(0, *m.live, *ws);                                    // Synth::reloadPatchBank
+        open::SlotNames nm; open::patchNamesRead(0, *ws, nm);                       // Synth::loadSlotNames
+        for (int sl = 1; sl < 16; sl++) m.slotNames[sl] = nm.name[sl];
+        m.backupName = nm.name[0]; m.name = m.projName = slot0Name; m.dirty = false; return loaded; };
+      auto selectSlot = [&](int slot) {                                 // Synth::selectPatchSlot
+        const int prev = open::patchBankCurrent(0);
+        open::patchBankRestore(0); if (m.dirty) savePart();
+        const auto r = open::patchBankSelect(0, slot, *m.live, *ws);
+        if (r == open::SlotSelect::kLoaded || r == open::SlotSelect::kCopied) {
+          m.slotNames[prev] = m.name;
+          if (slot == 0) m.name = m.slotNames[0].empty() ? "Init" : m.slotNames[0];
+          else if (r == open::SlotSelect::kLoaded) m.name = m.slotNames[slot].empty() ? "Unnamed" : m.slotNames[slot];
+          m.dirty = false; persist(); }
+        return r; };
+      auto changeEngine = [&](int type) {                               // SynthEditor::changeSynthModel
+        if (m.dirty && open::patchBankCurrent(0) > 0) savePart();       // Synth::flushPatchSlot
+        if (m.dirty) savePart();                                        // Synth::backupSlotZero
+        if (open::patchBackupSave(0, *m.live, *ws) == open::Backup::kSaved) { m.backupName = m.projName; persist(); }
+        m.type = type; auto fresh = ws->createPatch(type);              // Synth::setInstrumentType
+        open::patchBankSetLive(0, fresh.get()); m.live = std::move(fresh); m.name = "Init";
+        open::patchBankPreload(0, *m.live, *ws); m.slotNames[0].clear();
+        if (open::patchBackupRestore(0, *m.live, *ws)) { m.name = m.backupName.empty() ? "Unnamed" : m.backupName; m.dirty = false; }   // Synth::restoreSlotZeroBackup
+        else { ws->createPatch(type); ws->savePatch("0", *m.live); open::patchBankCommit(0); m.dirty = false; }                        // initCurrentPatch -> initPatch
+        m.projName = m.name;
+        persist(); };                                                    // the autosave that follows
+      auto sameAsFile = [&](const std::vector<uint8_t>& file) {          // the live patch holds the values of that file
+        open::PatchData pd; auto& op = static_cast<open::OpenPatch&>(*m.live);
+        if (!open::decodePatch(file.data(), file.size(), pd) || open::typeForEngineId(pd.engine) != m.type) return false;
+        float want[open::kMaxParams], got[open::kMaxParams]; op.valuesFromData(pd, want); op.getValuesRaw(got);
+        return std::memcmp(want, got, size_t(op.paramCount()) * sizeof(float)) == 0; };
+      auto engineOf = [&](const std::string& f) { open::PatchData pd; const auto& v = mw->files[f]; return open::decodePatch(v.data(), v.size(), pd) ? open::typeForEngineId(pd.engine) : -2; };
+      auto namesFile = [&]() { open::SlotNames nm; open::patchNamesRead(0, *ws, nm); return nm; };
+      auto start = [&]() { mw->files.clear(); mw->openNow = 0; return openProject(fixture, tV, "Fixture Zero"); };
+      auto isInit = [&](int type) {                                     // slot 0 is an untouched Init of that engine: same bytes as a new patch saved
+        auto p = ws->createPatch(type); open::PatchData pd; static_cast<open::OpenPatch&>(*p).exportData(pd);
+        uint8_t b[4096]; const size_t n = open::encodePatch(pd, b, sizeof(b)); return mw->files["0.patch"] == std::vector<uint8_t>(b, b + n); };
+      auto namesKept = [&]() { auto nm = namesFile();
+        return std::strcmp(nm.name[1], "Brass Tacks") == 0 && std::strcmp(nm.name[2], "M1 Organ") == 0 && std::strcmp(nm.name[3], "Ratio") == 0 &&
+               m.slotNames[1] == "Brass Tacks" && m.slotNames[2] == "M1 Organ" && m.slotNames[3] == "Ratio"; };
+
+      // A -> B -> A
+      bool ok = start() && sameAsFile(fixture["0.patch"]) && namesKept();
+      changeEngine(others[0]);
+      ok = ok && mw->files["0-b.patch"] == fixture["0.patch"] && engineOf("0.patch") == others[0] && isInit(others[0]) && m.name == "Init" && namesKept()
+              && std::strcmp(namesFile().name[0], "Fixture Zero") == 0;
+      check(ok, "engine change A to B: slot 0 file is backed up byte for byte, B starts with Init, the names of slots 1..3 stay in memory and in <P>.names");
+      ok = open::patchBankSelect(0, 1, *m.live, *ws) == open::SlotSelect::kOtherEngine && open::patchBankCurrent(0) == 0;   // B cannot open the VAP slot files
+      changeEngine(tV);
+      ok = ok && mw->files["0.patch"] == fixture["0.patch"] && sameAsFile(fixture["0.patch"]) && m.name == "Fixture Zero" && m.projName == "Fixture Zero" && namesKept()
+              && open::patchBankCurrent(0) == 0;
+      for (int sl : {1, 2, 3}) ok = ok && open::patchBankApply(0, sl);      // the Patch FX bank has the three slots again
+      open::patchBankApply(0, 0);
+      ok = ok && selectSlot(2) == open::SlotSelect::kLoaded && sameAsFile(fixture["0-2.patch"]) && m.name == "M1 Organ" && selectSlot(0) == open::SlotSelect::kLoaded && m.name == "Fixture Zero";
+      check(ok, "engine change A to B and back: slot 0 sound and name come back, slots 1..3 play and keep their names (memory and file)");
+
+      // A -> B -> C -> A
+      ok = start();
+      changeEngine(others[0]); changeEngine(others[1]);
+      ok = ok && mw->files["0-b.patch"] == fixture["0.patch"] && engineOf("0.patch") == others[1] && isInit(others[1]) && namesKept();
+      changeEngine(tV);
+      ok = ok && mw->files["0.patch"] == fixture["0.patch"] && sameAsFile(fixture["0.patch"]) && m.name == "Fixture Zero" && namesKept();
+      changeEngine(others[1]); changeEngine(others[0]); changeEngine(tV);                   // and again, over a longer chain
+      ok = ok && mw->files["0.patch"] == fixture["0.patch"] && m.name == "Fixture Zero" && namesKept();
+      check(ok, "engine change A to B to C to A: an untouched Init of B does not push out the backup, A comes back with its sound, name and slot names");
+
+      // slot 0 edited on B (documented trade-off): the backup is B's now, A gets Init
+      ok = start(); changeEngine(others[0]);
+      { const auto& md = m.live->getMetadata(); const float v = *m.live->getParamValue(0), hi = float(md.params[0].maxValue), lo = float(md.params[0].minValue);
+        m.live->setParamValue(0, v == hi ? lo : hi, Patch::ParamChangeSource::kKnob); m.dirty = true; }
+      changeEngine(tV);
+      ok = ok && engineOf("0.patch") == tV && isInit(tV) && m.name == "Init" && engineOf("0-b.patch") == others[0] && namesKept();
+      check(ok, "engine change: slot 0 edited on B, then B to A gives an Init for A (the one backup was replaced by B's edited patch), names 1..3 stay");
+
+      // on slot 2: the backup is slot 0's file, not slot 2's (also with slot 2 edited and not yet saved)
+      ok = start() && selectSlot(2) == open::SlotSelect::kLoaded && open::patchBankCurrent(0) == 2;
+      { const float v = *m.live->getParamValue(0), hi = float(m.live->getMetadata().params[0].maxValue), lo = float(m.live->getMetadata().params[0].minValue);
+        m.live->setParamValue(0, v == hi ? lo : hi, Patch::ParamChangeSource::kKnob); m.dirty = true; }
+      changeEngine(others[0]);
+      ok = ok && mw->files["0-b.patch"] == fixture["0.patch"] && mw->files["0-b.patch"] != fixture["0-2.patch"] && mw->files["0-2.patch"] != fixture["0-2.patch"]
+              && engineOf("0.patch") == others[0] && open::patchBankCurrent(0) == 0 && m.name == "Init" && namesKept();
+      changeEngine(tV);
+      ok = ok && mw->files["0.patch"] == fixture["0.patch"] && open::patchBankCurrent(0) == 0 && m.name == "Fixture Zero" && open::patchBankSelect(0, 2, *m.live, *ws) == open::SlotSelect::kLoaded;
+      check(ok, "engine change while on slot 2: slot 0's file is backed up (not slot 2's), the edit of slot 2 is saved, back on A slot 0 is restored");
+
+      // save to the project and reopen: the backup, its name and the slot names are carried
+      ok = start(); changeEngine(others[0]); persist();                                     // WorkspaceProjectSave -> saveDirtyWorkspacePatches
+      const auto project = mw->files; const std::string projName = m.projName; const int projType = m.type;
+      ok = ok && project.count("0-b.patch") == 1 && project.at("0-b.patch") == fixture["0.patch"];
+      mw->files.clear(); mw->files["0-b.patch"] = {5, 5, 5}; mw->files["0-2.patch"] = {1}; mw->files["0.names"] = {'x'};   // another project's Workspace
+      ok = ok && openProject(project, projType, projName.c_str()) && mw->files["0-b.patch"] == fixture["0.patch"] && std::strcmp(namesFile().name[0], "Fixture Zero") == 0 && m.backupName == "Fixture Zero" && namesKept();
+      changeEngine(tV);                                                                      // B to A after the reopen (B's slot 0 is an untouched Init)
+      ok = ok && mw->files["0.patch"] == fixture["0.patch"] && sameAsFile(fixture["0.patch"]) && m.name == "Fixture Zero" && namesKept();
+      check(ok, "backup survives project save and reopen: <P>-b.patch and its name are carried, B back to A restores slot 0 in the reopened project");
+      // a project without a backup prunes the Workspace's stale one: nothing is restored from another project
+      auto noBackup = project; noBackup.erase("0-b.patch"); noBackup["0.names"] = fixture["0.names"];
+      mw->files.clear(); mw->files["0-b.patch"] = mw->files.count("x") ? std::vector<uint8_t>() : fixture["0.patch"];
+      ok = openProject(noBackup, projType, projName.c_str()) && mw->files.count("0-b.patch") == 0;
+      changeEngine(tV);
+      ok = ok && engineOf("0.patch") == tV && isInit(tV) && m.name == "Init";
+      check(ok, "reopen of a project without a backup removes the Workspace's old backup: the engine change gives Init");
+      check(mw->openNow == 0, "engine change: every file opened is closed again");
+      open::patchBankSetLive(0, nullptr);
+      mw->files.clear();
+    }
+#endif
 #ifdef OT_ORACLE
     // OpenTracker's own codec as oracle: its Init patches load here and our files decode and re-encode there byte for byte
     bool oraOk = true; int engIds[4] = { ot::kSynthEngineAcd, ot::kSynthEngineFat, ot::kSynthEngineVap, ot::kSynthEngineWtfm };

@@ -5,9 +5,10 @@
 // files, in Workspace/ and in the project folder (copyWorkspacePatches carries and prunes it like a slot file):
 //
 //     tffnames 1\n
+//     b=<name>\n               the name of the slot 0 backup of an engine change (<P>-b.patch), when there is one
 //     <slot>=<name>\n          one line per named slot, slot 1..15 in decimal, ascending
 //
-// Slot 0 is not in the file (the project stores its name). A name is 1..31 bytes of 0x20..0x7E or higher, never a control
+// Slot 0 is not in the file (the project stores its name), name[0] of SlotNames is the backup's. A name is 1..31 bytes of 0x20..0x7E or higher, never a control
 // character. The reader takes lines as they come, skips what it does not understand (unknown slot, empty or over-long name, control
 // character, duplicate keeps the last) and never reads or writes past its buffers. A file without the first line is ignored whole.
 // Stock firmware never opens the file.
@@ -27,7 +28,7 @@ constexpr const char* kSlotNamesExt = ".names";
 
 struct SlotNames
 {
-    char name[kSlotNameSlots][kSlotNameMax + 1] = {}; // [0] is unused, an empty string is "no name"
+    char name[kSlotNameSlots][kSlotNameMax + 1] = {}; // [0] is the name of the slot 0 backup, an empty string is "no name"
 };
 
 namespace slotnames_detail
@@ -51,7 +52,7 @@ inline size_t encodeSlotNames(const SlotNames& in, uint8_t* out, size_t cap)
     }
     size_t n = kHeaderLen;
     std::memcpy(out, kHeader, kHeaderLen);
-    for (int slot = 1; slot < kSlotNameSlots; slot++)
+    for (int slot = 0; slot < kSlotNameSlots; slot++) // 0 is the backup, written as "b"
     {
         size_t len = 0;
         while (len < kSlotNameMax && in.name[slot][len] && printable(static_cast<unsigned char>(in.name[slot][len])))
@@ -67,11 +68,18 @@ inline size_t encodeSlotNames(const SlotNames& in, uint8_t* out, size_t cap)
         {
             return 0;
         }
-        if (slot >= 10)
+        if (slot == 0)
         {
-            out[n++] = uint8_t('0' + slot / 10);
+            out[n++] = 'b';
         }
-        out[n++] = uint8_t('0' + slot % 10);
+        else
+        {
+            if (slot >= 10)
+            {
+                out[n++] = uint8_t('0' + slot / 10);
+            }
+            out[n++] = uint8_t('0' + slot % 10);
+        }
         out[n++] = '=';
         std::memcpy(out + n, in.name[slot], len);
         n += len;
@@ -107,17 +115,27 @@ inline bool decodeSlotNames(const uint8_t* data, size_t len, SlotNames& out)
         {
             lineEnd--;
         }
-        // <slot>=<name>
+        // <slot>=<name>, or b=<name> for the backup (stored as slot 0)
         size_t p = i;
         int slot = 0;
         size_t digits = 0;
-        while (p < lineEnd && data[p] >= '0' && data[p] <= '9' && digits < 3)
+        bool backup = false;
+        if (p + 1 < lineEnd && data[p] == 'b' && data[p + 1] == '=')
         {
-            slot = slot * 10 + (data[p] - '0');
+            backup = true;
+            digits = 1;
             p++;
-            digits++;
         }
-        if (digits > 0 && p < lineEnd && data[p] == '=' && slot >= 1 && slot < kSlotNameSlots)
+        else
+        {
+            while (p < lineEnd && data[p] >= '0' && data[p] <= '9' && digits < 3)
+            {
+                slot = slot * 10 + (data[p] - '0');
+                p++;
+                digits++;
+            }
+        }
+        if (digits > 0 && p < lineEnd && data[p] == '=' && (backup || (slot >= 1 && slot < kSlotNameSlots)))
         {
             p++;
             const size_t nameLen = lineEnd - p;
@@ -139,7 +157,7 @@ inline bool decodeSlotNames(const uint8_t* data, size_t len, SlotNames& out)
 
 inline bool anySlotName(const SlotNames& n)
 {
-    for (int slot = 1; slot < kSlotNameSlots; slot++)
+    for (int slot = 0; slot < kSlotNameSlots; slot++)
     {
         if (n.name[slot][0])
         {

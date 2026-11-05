@@ -126,7 +126,13 @@ class Synth
     void restorePatchFx(int part) { polysynth::open::patchBankRestore(part); }
     // Writes the open slot to its Workspace file when it was edited (before the engine of the part changes)
     void flushPatchSlot(int part);
-    void reloadPatchBank(int part);
+    // keepNames: an engine change, the slot files (and so the names) of the old engine stay, only slot 0's name goes
+    void reloadPatchBank(int part, bool keepNames = false);
+    // Engine change: before setInstrumentType, keeps the slot 0 file as <P>-b.patch (see patchBackupSave). `slotZeroName` is the name the
+    // project stores for slot 0. After setInstrumentType, restoreSlotZeroBackup puts the backup back as slot 0 when it is a patch of the
+    // new engine (true, patch and name are the backup's), else false and the caller loads Init.
+    void backupSlotZero(int part, const char* slotZeroName);
+    bool restoreSlotZeroBackup(int part);
     bool applyPatchBankSlot(int part, int slot);
     // Names of slots 1..15 live in the side file <P>.names next to the slot files (see synth-open/open_slotnames.h). Written whenever
     // a name changes and on project save, read on project load.
@@ -173,6 +179,7 @@ class Synth
         bool patchDirty = false;
 #ifdef FEATURE_SYNTH_OPEN
         std::array<std::string, polysynth::open::kPatchBankSlots> slotNames = {}; // name of each slot while it is not the open one
+        std::string backupName = {}; // name of the slot 0 patch kept in <P>-b.patch by the last engine change
 #endif
     };
     std::array<Part, kSynthParts> parts;
