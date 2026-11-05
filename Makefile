@@ -117,6 +117,8 @@ ifeq ($(SYNTH_OPEN),1)
 	@printf %s "$(SYNTH_PTF)" | grep -Eq '^PolyendTracker_.+_[0-9]+\.[0-9]+\.[0-9]+\.ptf$$' || { echo "ERROR: $(SYNTH_PTF) must match PolyendTracker_<TAG>_<A.B.C>.ptf"; exit 1; }
 	@test $$(printf %s "$(SYNTH_PTF)" | wc -c) -ge 15 || { echo "ERROR: $(SYNTH_PTF) shorter than 15 chars (not listed in Config > Firmware)"; exit 1; }
 	python3 "$(SYNTH_OPEN_DIR)/tools/check_ptf.py" "$(MK66_BUILD)/PolyendTracker_$(ORIGINAL_POSTFIX).ptf"
+	@# No static constructor may touch the SDRAM: it is set up in main(), after them (a hit never boots, f563f27)
+	python3 "$(SYNTH_OPEN_DIR)/tools/check_static_init.py" --toolchain "$(TOOLCHAIN)" "$(MK66_BUILD)/PolyendTracker.axf"
 	@cp "$(MK66_BUILD)/PolyendTracker_$(ORIGINAL_POSTFIX).ptf" "$(OUT_DIR)/$(SYNTH_PTF)"
 	@echo "-> Output: $(OUT_DIR)/$(SYNTH_PTF)"
 	@# Size guard of its own: the one in platforms/mk66/makefile only runs while the image is being linked.

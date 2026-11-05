@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstring>
 #include <new>
+#include <type_traits>
 #include <vector>
 
 // The patch is applied while the render path cannot read it (macros are vectors). The host test
@@ -26,7 +27,11 @@
 #define OPEN_UNLOCK_AUDIO() ((void)0)
 #define OPEN_EXTERNAL_RAM
 #else
-#define OPEN_EXTERNAL_RAM __attribute__((section(".noinit.$EXTERNAL_RAM"))) // the SDRAM, as __NOINIT(EXTERNAL_RAM)
+// The SDRAM, as __NOINIT(EXTERNAL_RAM). It only works once main() has run hardware init (platforms/mk66/source/hardware.cpp,
+// externalRAM.init()), after every static constructor (teensy_core/mk20dx128.c, __libc_init_array()). So a global placed here must be
+// trivially default constructible (static_assert next to each one): a constructor would write the SDRAM at static init, fault on the bus and
+// leave the device on the bootloader's "100" (f563f27). synth-open/tools/check_static_init.py checks the linked image for it.
+#define OPEN_EXTERNAL_RAM __attribute__((section(".noinit.$EXTERNAL_RAM")))
 #include "interruptsControl.h"
 #define OPEN_LOCK_AUDIO()   DISABLE_AUDIO_INTERRUPTS()
 #define OPEN_UNLOCK_AUDIO() ENABLE_AUDIO_INTERRUPTS()
@@ -306,6 +311,7 @@ struct PatchPoolSlot
 {
     alignas(8) unsigned char bytes[(sizeof(OpenPatch) + 7) & ~size_t(7)];
 };
+static_assert(std::is_trivially_default_constructible_v<PatchPoolSlot>, "OPEN_EXTERNAL_RAM: no static constructor may touch the SDRAM");
 OPEN_EXTERNAL_RAM PatchPoolSlot gPatchPool[kPatchPoolSize];
 bool gPatchPoolUsed[kPatchPoolSize];
 } // namespace
@@ -589,11 +595,14 @@ inline std::unique_ptr<uint8_t[]> tryBytes(size_t n)
 // The buffers of every .patch read and write (store and bank): the file bytes and the decoded data, 9.8 KB. They live in the SDRAM,
 // not on the heap: on the device the heap had no 8 KB block left after a while and every slot select failed ("Error loading slot").
 // Main thread only and never nested. A second lease while one is held gets nothing and its caller fails cleanly.
+// The decoded data is raw bytes, built in place by each lease: PatchData has member initialisers, so a PatchData member made gPatchScratch
+// a static constructor that wrote the SDRAM before it was set up (f563f27 never booted).
 struct PatchScratch
 {
     uint8_t file[kPatchFileMax + 1];
-    PatchData data;
+    alignas(PatchData) unsigned char data[sizeof(PatchData)];
 };
+static_assert(std::is_trivially_default_constructible_v<PatchScratch>, "OPEN_EXTERNAL_RAM: no static constructor may touch the SDRAM");
 OPEN_EXTERNAL_RAM PatchScratch gPatchScratch;
 bool gPatchScratchBusy = false;
 
@@ -606,7 +615,7 @@ class ScratchLease
         {
             gPatchScratchBusy = true;
             s = &gPatchScratch;
-            new (&s->data) PatchData(); // fresh: the SDRAM is not initialised
+            d = new (s->data) PatchData(); // fresh: the SDRAM is not initialised
         }
     }
     ~ScratchLease()
@@ -620,10 +629,11 @@ class ScratchLease
     ScratchLease& operator=(const ScratchLease&) = delete;
     explicit operator bool() const { return s != nullptr; }
     uint8_t* buf() const { return s->file; }
-    PatchData& data() const { return s->data; }
+    PatchData& data() const { return *d; }
 
   private:
     PatchScratch* s = nullptr;
+    PatchData* d = nullptr;
 };
 
 class OpenPatchStore final : public PatchStore
