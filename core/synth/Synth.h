@@ -162,7 +162,7 @@ class Synth
         std::string patchName = {};
         bool patchDirty = false;
 #ifdef FEATURE_SYNTH_OPEN
-        std::string slotZeroName = {}; // the project's patch name while another slot is open
+        std::array<std::string, polysynth::open::kPatchBankSlots> slotNames = {}; // name of each slot while it is not the open one
 #endif
     };
     std::array<Part, kSynthParts> parts;

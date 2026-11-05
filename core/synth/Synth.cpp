@@ -256,7 +256,10 @@ void Synth::reloadPatchBank(int part)
     static_assert(kSynthParts <= polysynth::open::kPatchBankParts, "one patch bank per synth part");
     assert(part < kSynthParts);
 
-    parts[part].slotZeroName.clear();
+    for (auto& name : parts[part].slotNames)
+    {
+        name.clear();
+    }
     if (parts[part].patch && patchStoreWorkspace)
     {
         polysynth::open::patchBankPreload(part, *parts[part].patch, *patchStoreWorkspace);
@@ -293,18 +296,16 @@ polysynth::open::SlotSelect Synth::selectPatchSlot(int part, int slot)
     const SlotSelect result = polysynth::open::patchBankSelect(part, slot, *parts[part].patch, *patchStoreWorkspace);
     if (result == SlotSelect::kLoaded || result == SlotSelect::kCopied)
     {
-        // slot 0 keeps the name the project stores, the other slots have no name in the file
-        if (previous == 0)
-        {
-            parts[part].slotZeroName = parts[part].patchName;
-        }
+        // The slot files carry no name: each slot's name is kept here while the slot is not the open one. Slot 0 is the name the
+        // project stores. A slot 1..15 never named in this session (project just loaded) shows "Unnamed".
+        parts[part].slotNames[previous] = parts[part].patchName;
         if (slot == 0)
         {
-            parts[part].patchName = parts[part].slotZeroName.empty() ? kInitPatchName : parts[part].slotZeroName;
+            parts[part].patchName = parts[part].slotNames[0].empty() ? kInitPatchName : parts[part].slotNames[0];
         }
         else if (result == SlotSelect::kLoaded)
         {
-            parts[part].patchName = "Unnamed";
+            parts[part].patchName = parts[part].slotNames[slot].empty() ? "Unnamed" : parts[part].slotNames[slot];
         }
         parts[part].patchDirty = false;
     }
