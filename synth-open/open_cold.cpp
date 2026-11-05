@@ -782,6 +782,7 @@ class OpenPatchStore final : public PatchStore
         kOk,
         kMissing, // no such file
         kOther,   // there, but damaged or of another engine
+        kError,   // the card failed while it was read
     };
     FileRead readPatchFile(const EngineDef* def, int typeId, const std::string& name, uint8_t* buf, PatchData& out)
     {
@@ -795,29 +796,46 @@ class OpenPatchStore final : public PatchStore
             return FileRead::kMissing;
         }
         size_t n = 0;
-        int32_t got; // a read error is -1: it ends the loop like the end of the file
+        int32_t got = 1;
         while (n <= kPatchFileMax && (got = fs->read(*h, std::span<uint8_t>(buf + n, kPatchFileMax + 1 - n))) > 0)
         {
             n += size_t(got);
         }
         fs->close(*h);
+        if (got < 0) // a failed read is not the end of the file: the prefix read so far may decode and would pass for the whole patch
+        {
+            return FileRead::kError;
+        }
         return decodePatch(buf, n, out) && typeForEngineId(out.engine) == typeId ? FileRead::kOk : FileRead::kOther;
     }
     // A whole small file by its full name (with extension) from the store's folder, at most `cap` bytes. 0 when missing or empty.
-    size_t readRaw(const std::string& file, uint8_t* buf, size_t cap)
+    // `ioError` (if given) says the card failed while it was read: the bytes returned are then not the file.
+    size_t readRaw(const std::string& file, uint8_t* buf, size_t cap, bool* ioError = nullptr)
     {
+        if (ioError)
+        {
+            *ioError = false;
+        }
         auto h = fs ? fs->open(file, FileSystem::OpenOptions::kNone) : std::nullopt;
         if (!h)
         {
             return 0;
         }
         size_t n = 0;
-        int32_t got;
+        int32_t got = 1;
         while (n < cap && (got = fs->read(*h, std::span<uint8_t>(buf + n, cap - n))) > 0)
         {
             n += size_t(got);
         }
         fs->close(*h);
+        if (got < 0)
+        {
+            if (ioError)
+            {
+                *ioError = true;
+            }
+            return 0;
+        }
         return n;
     }
     // The file `file` becomes exactly these bytes, or stays as it was: they go to <file>.tmp first and replace the old file only when
@@ -888,6 +906,7 @@ struct PartBank
 };
 PartBank gBank[kPatchBankParts];
 OpenPatch* volatile gLive[kPatchBankParts];
+bool gNamesUnreadable[kPatchBankParts]; // the names file of the part could not be read: it is not rewritten from empty names
 // The rows of every bank, in the SDRAM (as the patch scratch), not on the heap: on the device a short heap gave an empty bank and the
 // Patch FX did nothing without a word. Worst case, 16 slots plus the shadow row of the engine with the most parameters (kMaxParams):
 // 3 x 17 x 84 floats = 17,136 B. A part always uses the first (kPatchBankSlots + 1) * nParams floats of its block.
@@ -931,7 +950,9 @@ bool patchNamesRead(int part, PatchStore& workspace, SlotNames& out)
     {
         return false;
     }
-    const size_t n = static_cast<OpenPatchStore&>(workspace).readRaw(std::string(base) + kSlotNamesExt, buf.get(), kSlotNamesFileMax);
+    bool ioError = false;
+    const size_t n = static_cast<OpenPatchStore&>(workspace).readRaw(std::string(base) + kSlotNamesExt, buf.get(), kSlotNamesFileMax, &ioError);
+    gNamesUnreadable[part] = ioError; // a card error is not an empty file: the names in it are kept (patchNamesWrite)
     return n > 0 && decodeSlotNames(buf.get(), n, out);
 }
 
@@ -941,14 +962,19 @@ bool patchNamesWrite(int part, PatchStore& workspace, const SlotNames& in)
     {
         return false;
     }
+    if (gNamesUnreadable[part])
+    {
+        return false; // the file is there and was not read: empty names must not replace it
+    }
     OpenPatchStore& st = static_cast<OpenPatchStore&>(workspace);
     char base[8];
     patchSlotName(part, 0, base);
     const std::string file = std::string(base) + kSlotNamesExt;
     uint8_t probe[1];
-    if (!anySlotName(in) && st.readRaw(file, probe, 1) == 0)
+    bool probeError = false;
+    if (!anySlotName(in) && st.readRaw(file, probe, 1, &probeError) == 0)
     {
-        return true; // nothing to say and no file to correct: a project that never named a slot gets no side file
+        return !probeError; // nothing to say and no file to correct: a project that never named a slot gets no side file
     }
     auto buf = tryBytes(kSlotNamesFileMax); // not on the stack: the audio interrupt runs on the same one
     if (!buf)
@@ -1186,6 +1212,10 @@ SlotSelect patchBankSelect(int part, int slot, Patch& patch, PatchStore& workspa
     if (state == OpenPatchStore::FileRead::kOther)
     {
         return SlotSelect::kOtherEngine;
+    }
+    if (state == OpenPatchStore::FileRead::kError)
+    {
+        return SlotSelect::kError;
     }
     const int8_t origin = b.from >= 0 ? b.from : int8_t(b.cur); // the file a pending copy began from
     // The new slot takes over in one audio-free window. The Patch FX may have run during the file read: its replaced values are not the

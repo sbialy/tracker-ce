@@ -74,7 +74,8 @@ struct MemFS : FileSystem {
     if (failWrite) { files[x->path].insert(files[x->path].end(), d.begin(), d.begin() + d.size() / 2); return false; }   // a full card: half of it
     files[x->path].insert(files[x->path].end(), d.begin(), d.end()); return true; }
   int32_t read(FileHandle h, std::span<uint8_t> b) override { auto* x = (H*)h; auto& f = files[x->path];
-    size_t n = std::min(b.size(), f.size() - x->pos);
+    if (readFailAt >= 0 && x->pos >= size_t(readFailAt)) return -1;   // the card fails after readFailAt bytes
+    size_t n = std::min(b.size(), f.size() - x->pos); if (readFailAt >= 0) n = std::min(n, size_t(readFailAt) - x->pos);
     std::copy_n(f.begin() + x->pos, n, b.begin()); x->pos += n; return (int32_t)n; }
   bool seek(FileHandle, int) override { return true; }
   void createFolder(const std::string&) override {}
@@ -82,9 +83,9 @@ struct MemFS : FileSystem {
     if (failReplace || !files.count(from)) return false; files[to] = std::move(files[from]); files.erase(from); return true; }
   bool remove(const std::string& path) override { return files.erase(path) > 0; }
   // failure injection and hooks of the save, load and copy tests
-  bool failOpenWrite = false, failWrite = false, failReplace = false;
+  bool failOpenWrite = false, failWrite = false, failReplace = false; int readFailAt = -1;
   std::function<void(const std::string&)> onRead, onWrite;
-  void healthy() { failOpenWrite = failWrite = failReplace = false; onRead = nullptr; onWrite = nullptr; }
+  void healthy() { failOpenWrite = failWrite = failReplace = false; readFailAt = -1; onRead = nullptr; onWrite = nullptr; }
 };
 // The card operations of the bank copy (Synth::copyWorkspacePatches) over two in-memory folders: paths "S\\name" are the source folder, "D\\name" the destination.
 struct MemBankOps {
@@ -1013,6 +1014,23 @@ int main() {
         reset(); S.erase("0.patch"); S.erase("0.names");
         ok = ok && open::copyPartBank(ops, 0, "S", "D") && D["0.patch"] == std::vector<uint8_t>{10} && !D.count("0.names");       // slot 0 is never removed, the names file is
         check(ok, "B5: a failed bank copy reports it and deletes nothing, a good one replaces the files and prunes the slots the source lacks");
+      }
+      // S1: a card read error is not the end of the file
+      {
+        auto live = setup(); auto probe = ws->createPatch(T);
+        const auto file = mw->files["0-1.patch"]; open::PatchData pd; size_t cut = 0;
+        for (size_t k = 1; k < file.size() && !cut; k++) if (open::decodePatch(file.data(), k, pd) && open::typeForEngineId(pd.engine) == T) cut = k;   // a prefix that would pass as a whole patch
+        mw->readFailAt = int(cut);
+        bool ok = cut > 0 && !ws->loadPatch("0-1", *probe, true) && raw(*probe) == initV;
+        ok = ok && open::patchBankSelect(0, 1, *live, *ws) == open::SlotSelect::kError && open::patchBankCurrent(0) == 0 && raw(*live) == baseV;
+        mw->healthy();
+        open::SlotNames nm; std::snprintf(nm.name[1], sizeof(nm.name[1]), "Lead one"); ok = ok && open::patchNamesWrite(0, *ws, nm);
+        const auto names = mw->files["0.names"]; open::SlotNames back;
+        mw->readFailAt = 4;
+        ok = ok && !open::patchNamesRead(0, *ws, back) && !open::patchNamesWrite(0, *ws, open::SlotNames()) && mw->files["0.names"] == names;   // the unread names are not overwritten by empty ones
+        mw->healthy();
+        ok = ok && open::patchNamesRead(0, *ws, back) && std::strcmp(back.name[1], "Lead one") == 0 && open::patchNamesWrite(0, *ws, back);
+        check(ok, "S1: a read error ends a patch or names read as an error, no prefix is taken for the file and empty names do not replace unread ones");
       }
       check(mw->openNow == 0, "review blockers: every file opened is closed again");
       open::patchBankSetLive(0, nullptr);
