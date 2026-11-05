@@ -40,12 +40,20 @@ else
 endif
 
 # make original SYNTH_OPEN=1 is tracker-ff: the edition text on the Config screen becomes "tracker-ff"
-# (label "1.0.0 tracker-ff", next to the build hash). The numeric FW_VER 1.0.0 is stored in project/config
-# headers and must stay what it is. SYNTH_OPEN_VER is the tracker-ff version (it names the .ptf).
-# No code change: only the FW_EDITION_NAME string differs.
-SYNTH_OPEN_VER := 1.0.0
+# (label "1.1.0 tracker-ff", next to the build hash) and the numeric FW_VER is the tracker-ff version, which is also
+# written into project, instrument, pattern and config headers (informational, nothing checks it on load).
+# SYNTH_OPEN_VER names the .ptf. A stock make original keeps the numbers above, so its image does not change.
+SYNTH_OPEN_VER := 1.1.0
 ifeq ($(SYNTH_OPEN),1)
   FW_EDITION_TEXT := tracker-ff
+  _so_ver_num := $(firstword $(subst -, ,$(SYNTH_OPEN_VER)))
+  ifneq ($(PRODUCT),MINI)
+  ifneq ($(PRODUCT),PLUS)
+    FW_VER_1 := $(word 1,$(subst ., ,$(_so_ver_num)))
+    FW_VER_2 := $(word 2,$(subst ., ,$(_so_ver_num)))
+    FW_VER_3 := $(word 3,$(subst ., ,$(_so_ver_num)))
+  endif
+  endif
 else
   FW_EDITION_TEXT := $(EDITION_NAME)
 endif
