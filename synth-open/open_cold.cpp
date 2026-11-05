@@ -548,7 +548,7 @@ void OpenPatch::exportData(PatchData& d) const
 
 // The data of a new patch of the engine, as exportData of a fresh OpenPatch gives it (the smoke test compares both for every engine) but
 // from the engine definition alone: no metadata, no allocation. `d` is fresh.
-void open::initPatchData(const EngineDef& def, PatchData& d)
+void initPatchData(const EngineDef& def, PatchData& d)
 {
     d.engine = engineIdForType(def.typeId);
     d.nParams = std::min(def.paramCount, kMaxParams);
