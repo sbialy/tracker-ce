@@ -6,10 +6,10 @@ The shim is built only with `make original SYNTH_OPEN=1`. It replaces the closed
 
 What 1.0.0 has:
 
-- 17 synth engines in one image, chosen at build time (see "Engine picker"). ACD, FAT, VAP and WTFM are the Polyend engines as OpenTracker re-implements them. PERC is OpenTracker's drum engine, CHIP is Polyend's own open Chiptune voice, PHZ is our own phase distortion engine written from the public manual, and JU6, FM4, D-Type, CS-Type, A-Type, T-Type, 8-Type, Hand-Type, B-Type and Arc-Type are OpenTracker 3.x modules. MIDI registers by name only and Shaping has no engine.
+- 16 synth engines in one image, chosen at build time (see "Engine picker"). ACD, FAT, VAP and WTFM are the Polyend engines as OpenTracker re-implements them. PERC is OpenTracker's drum engine, CHIP is Polyend's own open Chiptune voice, PHZ is our own phase distortion engine written from the public manual, and JU6, FM4, D-Type, CS-Type, A-Type, T-Type, 8-Type, B-Type and Arc-Type are OpenTracker 3.x modules. The Hand-Type module is in the tree and can be picked by name (`HANDTYPE`), the release image leaves it out. MIDI registers by name only and Shaping has no engine.
 - Up to 4 voices per instrument, a shared voice pool and OpenTracker's governor.
 - `.patch` files that load and save from the SD card, and pitch bend.
-- A flash trim (`TRIM=1`) that makes all 17 engines fit in the original's flash.
+- A flash trim (`TRIM=1`) that makes all 16 engines fit in the original's flash.
 - A set of audio CPU optimisations that remove work the stock firmware does for silence.
 
 Status: 1.0.0 has not been run on a device. An earlier pre-release build of the same design was run on one original Tracker, and the device numbers below are labelled as such. The host smoke test and the emulated benches are the checks that cover 1.0.0 itself.
@@ -71,7 +71,7 @@ Memory is all SRAM (the libc heap and `.bss`, no big per voice buffer, the voice
 
 ```
 make original SYNTH_OPEN=1                                     # default set ACD FAT VAP WTFM
-make original SYNTH_OPEN=1 SYNTH_ENGINES="ACD VAP WTFM CHIP"   # any subset of the 17 names below
+make original SYNTH_OPEN=1 SYNTH_ENGINES="ACD VAP WTFM CHIP"   # any subset of the 17 names below, the release set is the 16 without HANDTYPE
 make synth-engines [SYNTH_ENGINES="..."]                       # flash cost of every engine and what fits on top of the selection
 ```
 
@@ -81,7 +81,7 @@ The 17 names are ACD FAT VAP WTFM PERC CHIP JU6 PHZ FM4 DTYPE CSTYPE ATYPE TTYPE
 - Size guards: `FLASH_IMG_MAX` is 1,044,480 B (0xFF000, the last 4 KB sector stays free) and is checked three times: the post-build `size` check of the platform makefile and the linker ASSERT (both on text+data), and again in the top Makefile from the linked `.axf`, so a second `make` of an oversize set fails as well. An oversize set leaves no `.ptf` in `build/`. `SYNTH_FLASH_IMG_MAX=n` lowers the cap for one build. The real flash image is text + data. The FLASH line of ld leaves out the `.data` load image and is about 6.5 KB too optimistic.
 - The `.ptf` name is `PolyendTracker_<TAG>_<A.B.C>.ptf`, with TAG `FF` for TRIM builds (`PolyendTracker_FF_1.0.0.ptf`, 27 chars) and `SO` for plain SYNTH_OPEN builds. The firmware list (`platforms/mk66/3rdparty/SD/SD.cpp`) shows only names that start with `PolyendTrac`, are lowercase `.ptf` and are at least 15 chars long. The bootloader reads at most 31 chars. The engine list is in `build/BUILD.txt`, written next to the `.ptf` after a successful build (engines, image size, free bytes, bytes per engine from the link map).
 - `make synth-engines` links all engines once with the cap lifted for that one link, sums the input sections that survive `--gc-sections` per engine archive member and prints the cost per engine, the base without engines and the estimate for the selection. The estimate is within about 1 KB of a real link, the real size is always the one `make original` prints.
-- Projects store an engine as its canonical number, not as the position in the list on screen, so a project keeps its engines across builds with other engine sets: ACD 0, FAT 1, VAP 2, WTFM 3, PERC 4, DIRT 5, CHIP 6, JU6 7, PHZ 8, FM4 9, DTYPE 10, CSTYPE 11, ATYPE 12, TTYPE 13, 8TYPE 14, HANDTYPE 15, BTYPE 16, ARCTYPE 17. PERC is 4 and CHIP is 6 as in the stock Tracker+ and Mini CE list. A part whose engine the build lacks (DIRT, an engine left out) is reset to that part's defaults on load (`Synth::validateSynthPartSettings`, called from `fProjEdit.cpp` on the loaded project), with the first engine of the build when the default engine is not in it. The reset is made in the loaded project, so saving writes the default part over the original engine choice (the part's `Workspace/<N>.patch` file is not touched). Open such a project in a build that has the engine, or do not save it.
+- Projects store an engine as its canonical number, not as the position in the list on screen, so a project keeps its engines across builds with other engine sets: ACD 0, FAT 1, VAP 2, WTFM 3, PERC 4, DIRT 5, CHIP 6, JU6 7, PHZ 8, FM4 9, DTYPE 10, CSTYPE 11, ATYPE 12, TTYPE 13, 8TYPE 14, HANDTYPE 15, BTYPE 16, ARCTYPE 17. PERC is 4 and CHIP is 6 as in the stock Tracker+ and Mini CE list. A part whose engine the build lacks (DIRT, an engine left out such as HANDTYPE in the release image) is reset to that part's defaults on load (`Synth::validateSynthPartSettings`, called from `fProjEdit.cpp` on the loaded project), with the first engine of the build when the default engine is not in it. The reset is made in the loaded project, so saving writes the default part over the original engine choice (the part's `Workspace/<N>.patch` file is not touched). Open such a project in a build that has the engine, or do not save it.
 - `.patch` engine numbers differ from the stored numbers on purpose, see "Patch files".
 
 ### PERC
@@ -100,7 +100,7 @@ PERC is the Tracker+ and Mini drum synth: one slot holds a whole kit (kick, tom,
 
 CPU: the first device run of CHIP on a pre-release build showed the red line at once. The voice called `powf`, `sinf`, `fmodf`, `roundf` and (for the drum model) `expf` per sample. Newlib's float libm costs about 380 cycles per `powf` on the M4F, so one voice took 229,082 cycles per 128 frame block at `-Os` (43.9 % of the 522,240 cycle budget). The fix, all under `FEATURE_SYNTH_OPEN` so the Tracker+ and Mini builds keep `std::`: exp2 and sine as polynomials (relative error 5e-9 and 7e-9, exp2 exact at integers), `round` and `fmod(x, 1)` as exact integer code, the pitch and the filter coefficient recomputed only when their input changes, and the vibrato sine skipped at depth 0. A held note with static pitch renders bit identical to the old voice, with moving pitch the difference is a few samples where the 6 bit quantiser flips.
 
-Emulated cost per voice per block, `-Os` / `-O2`: default patch 14.4 / 12.7 %, held in sustain 12.1 / 10.6 %, worst model (Super Square) 18.6 / 15.6 %. Four voices of the worst model are about 74 % (`-Os`), so CHIP is still the most expensive engine here. `SYNTH_OPT_CHIP=-O2` saves 12 % of that for +3.6 KB and would put the 17 engine image past the highest end known to boot, so the default stays `-Os`. Further savings would mean control rate updates of the filter coefficient, which changes the sound. The figures are emulated (no flash wait states), not read from a device.
+Emulated cost per voice per block, `-Os` / `-O2`: default patch 14.4 / 12.7 %, held in sustain 12.1 / 10.6 %, worst model (Super Square) 18.6 / 15.6 %. Four voices of the worst model are about 74 % (`-Os`), so CHIP is still the most expensive engine here. `SYNTH_OPT_CHIP=-O2` saves 12 % of that for +3.6 KB and would put the 16 engine image past the highest end known to boot, so the default stays `-Os`. Further savings would mean control rate updates of the filter coefficient, which changes the sound. The figures are emulated (no flash wait states), not read from a device.
 
 ### PHZ
 
@@ -207,11 +207,11 @@ A logo is built in when any engine that wears it is picked: `FW_ICON_PERC` (PERC
 
 ## Flash trim (TRIM=1)
 
-`TRIM=1` is an opt-in build switch for the "no feature loss" trims. It frees about 157 KB of the original's 1 MB flash, which is what lets all 17 engines link. The plain build is untouched, and `TRIM=1` without `SYNTH_OPEN=1` is an error (stock `make original` has no trims, by design).
+`TRIM=1` is an opt-in build switch for the "no feature loss" trims. It frees about 157 KB of the original's 1 MB flash, which is what lets the 16 release engines link. The plain build is untouched, and `TRIM=1` without `SYNTH_OPEN=1` is an error (stock `make original` has no trims, by design).
 
 ```
 make original SYNTH_OPEN=1 TRIM=1 \
-  SYNTH_ENGINES="ACD FAT VAP WTFM PERC CHIP JU6 PHZ FM4 DTYPE CSTYPE ATYPE TTYPE 8TYPE HANDTYPE BTYPE ARCTYPE"
+  SYNTH_ENGINES="ACD FAT VAP WTFM PERC CHIP JU6 PHZ FM4 DTYPE CSTYPE ATYPE TTYPE 8TYPE BTYPE ARCTYPE"
 make synth-engines TRIM=1 [SYNTH_ENGINES="..."]   # budget table of the trim image
 ```
 
@@ -234,11 +234,11 @@ Sizes are text+data from `arm-none-eabi-size` against the cap of 1,044,480 B, to
 
 | Build | text+data | free | highest .ptf address |
 |---|---:|---:|---|
-| `SYNTH_OPEN=1 TRIM=1`, all 17 engines (the 1.0.0 release image) | 1,030,080 | 14,400 | 0xFB7C0 |
+| `SYNTH_OPEN=1 TRIM=1`, the 16 release engines | 1,023,888 | 20,592 | 0xF9F90 |
 
-The highest image end known to boot on a device is 0xFC2AC (1,032,876 B, an early pre-release image), so the 1.0.0 image ends 2,796 B below it. Without TRIM the 17 engine set does not link. The flash cost of each engine in the 17 engine TRIM link (`make synth-engines TRIM=1`, within about 1 KB of the real marginal cost) is ACD 9,374, FAT 12,952, VAP 15,514, WTFM 14,793, PERC 23,631, CHIP 10,685, JU6 6,108, PHZ 15,154, FM4 7,291, DTYPE 9,869, CSTYPE 10,507, ATYPE 9,989, TTYPE 14,001, 8TYPE 15,474, HANDTYPE 9,140, BTYPE 9,740 and ARCTYPE 13,939 B, with a base of about 824,700 B without engines. Re-run the target for exact figures, they move with every merge.
+The highest image end known to boot on a device is 0xFC2AC (1,032,876 B, an early pre-release image), so the release image ends 8,988 B below it. Without TRIM the 16 engine set does not link. The flash cost of each engine in the 16 engine TRIM link (`make synth-engines TRIM=1`, within about 1 KB of the real marginal cost) is ACD 9,374, FAT 12,952, VAP 15,514, WTFM 14,793, PERC 23,655, CHIP 10,685, JU6 6,108, PHZ 15,154, FM4 7,291, DTYPE 9,868, CSTYPE 10,507, ATYPE 9,989, TTYPE 14,025, 8TYPE 15,474, BTYPE 9,740 and ARCTYPE 13,939 B, with a base of about 824,800 B without engines. HANDTYPE costs about 9,140 B when it is picked. Re-run the target for exact figures, they move with every merge.
 
-RAM of the 17 engine TRIM image (`-print-memory-usage`): about 139.3 KB of 256 KB (`.data` 5.7 KB, `.bss` 110.2 KB, `.dmabuffers` 20.7 KB) and about 15.6 MB of the 16 MB SDRAM. Static RAM of the engine objects: JU6 1,536 B (chorus lines), T-Type 48 B and PERC 48 B, the other engines 0 B of `.bss` and 8 to 12 B of `.data`. The remaining flash levers, none of them needed now: a printf smaller than nano's float one (about 7.5 KB) and font recompression.
+RAM of the 16 engine TRIM image (`-print-memory-usage`): about 139.3 KB of 256 KB (`.data` 5.7 KB, `.bss` 110.2 KB, `.dmabuffers` 20.7 KB) and about 15.6 MB of the 16 MB SDRAM. Static RAM of the engine objects: JU6 1,536 B (chorus lines), T-Type 48 B and PERC 48 B, the other engines 0 B of `.bss` and 8 to 12 B of `.data`. The remaining flash levers, none of them needed now: a printf smaller than nano's float one (about 7.5 KB) and font recompression.
 
 Known risks of TRIM that a device run has to keep an eye on: nano malloc and nano stdio replace newlib's (`Profiler.cpp` and the Arduino `String` class use malloc and `%f` goes through the nano float printf), and `-Os` on `source/` and on the platform (ISRs, SD read speed) and the `powf`, `cosf` and `tanf` coefficients (tiny numeric drift in the EQ and the SGTL5000 constants) have not been listened to separately.
 
@@ -290,7 +290,7 @@ Evidence tool: `synth-open/tools/audio_opt/run_graph.sh`. It compiles the real l
 
 `AudioEffectPolyverb` has two 16384 x int16 line buffers (32 KB each): E (`internalRamReverbBuff`, `__NOINIT(EXTERNAL_RAM)` on the MK66 although it is named internal and is `.noinit` SRAM on the Tracker+) and E2 (`externalRamReverbBuff`, `.reverb_memory`). Both sit in the 90 MHz SDRAM with no data cache. Per output sample the reverb makes 12 reads and 11 writes (E: 8 + 8, E2: 4 + 3), 2944 accesses per block. `REVERB_SRAM=<n>` (`core/makefile`, `-DFW_REVERB_SRAM`, default 1 for SYNTH_OPEN builds):
 
-| REVERB_SRAM | placement | accesses off the SDRAM per block | RAM left for heap + stack (17 engines) |
+| REVERB_SRAM | placement | accesses off the SDRAM per block | RAM left for heap + stack (16 engines) |
 | --- | --- | --- | --- |
 | 0 | E and E2 in SDRAM (stock) | 0 | 122,808 B |
 | 1 (default) | E in SRAM (`.noinit`), E2 in SDRAM | 2048 of 2944 (70 %) | 90,040 B |
@@ -365,7 +365,7 @@ The estimated saving per block, in points of 522,240 cycles (device profile base
 
 Measured on an original Tracker with pre-release builds: with the first four items, Audio CPU on the Config screen (dev mode) on the same song read min 9, max 76 and avg 50 against stock CE at 43 / 80. With all five, a 4 voice VAP part played at 52 % peak. The reverb and delay tails and the synth sends were checked by ear and worked. 1.0.0 adds the upstream merge and one `-Os` change on top of that build and has not been measured on a device yet. Before a wider release compare its Audio CPU readout with the numbers above.
 
-Not done: profiling instrumentation of the audio graph (a DWT cycle counter build) costs about 7 KB on the stock image and does not fit next to 17 engines. A profiling build with fewer engines (`SYNTH_ENGINES="ACD FAT VAP WTFM"` has about 60 KB free) would measure the same graph.
+Not done: profiling instrumentation of the audio graph (a DWT cycle counter build) costs about 7 KB on the stock image and does not fit next to 16 engines. A profiling build with fewer engines (`SYNTH_ENGINES="ACD FAT VAP WTFM"` has about 60 KB free) would measure the same graph.
 
 ## Stock build
 
@@ -384,15 +384,15 @@ The image embeds the git short hash (`BUILD_ID`), so the sha256 changes with eve
 You need `make`, `python3` and the GNU Arm Embedded Toolchain 10.3-2021.10 (in `./agt/10.3/` or `TOOLCHAIN=/path/to/arm-none-eabi-`).
 
 ```
-# the 17 engine release image, build/PolyendTracker_FF_1.0.0.ptf
+# the 16 engine release image, build/PolyendTracker_FF_1.0.0.ptf
 make original SYNTH_OPEN=1 TRIM=1 \
-  SYNTH_ENGINES="ACD FAT VAP WTFM PERC CHIP JU6 PHZ FM4 DTYPE CSTYPE ATYPE TTYPE 8TYPE HANDTYPE BTYPE ARCTYPE"
+  SYNTH_ENGINES="ACD FAT VAP WTFM PERC CHIP JU6 PHZ FM4 DTYPE CSTYPE ATYPE TTYPE 8TYPE BTYPE ARCTYPE"
 
 # folder and zip with the .ptf, LICENSE, NOTICE.md and every third party license text, in build/release/
 make package-release SYNTH_OPEN=1 TRIM=1
 ```
 
-- `package-release` only packages. The default engine set is the 4 engine one, so build with the explicit 17 engine list first. `synth-open/tools/package_release.sh build/<image>.ptf` does the same packaging for an existing image.
+- `package-release` only packages. The default engine set is the 4 engine one, so build with the explicit 16 engine list first. `synth-open/tools/package_release.sh build/<image>.ptf` does the same packaging for an existing image.
 - A `-D` define change (for example in `version.mk`) does not rebuild the objects that depend on it. After changing a version or tag, delete the objects that depend on `mtStructs.h` and grep the `.ptf` for the old strings.
 - `make clean` at the top level removes everything in `build/`, so keep copies of the images you want.
 - Host checks that need no device: `synth-open/tools/run_smoke.sh "<engines>"` (smoke test), `make synth-engines` (flash budget), `tools/phz_cycles/run_bench.sh` (engine cycles), `tools/idle_cycles/run_bench.sh` and `tools/audio_opt/run_graph.sh` (audio graph). The emulated benches need a Python with `unicorn` and `capstone`.

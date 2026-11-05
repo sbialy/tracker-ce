@@ -8,11 +8,11 @@ tracker-ff is not affiliated with, endorsed by or supported by Polyend. It is fr
 
 Upstream CE has synth engines only on the Tracker+ and the Mini, because Polyend's engine library is closed and built for their Cortex-M7 chip. tracker-ff replaces that layer on the original with an open one in [`synth-open/`](synth-open/README.md), so the original gets synth slots too. It never links Polyend's closed `libPolySynth.a` or `libPolyDSP.a`.
 
-- **17 synth engines** in one image: ACD, FAT, VAP, WTFM, PERC, CHIP, JU6, PHZ, FM4, D-Type, CS-Type, A-Type, T-Type, 8-Type, Hand-Type, B-Type and Arc-Type. Most come from [OpenTracker](https://github.com/sandlbn/polyend-tracker-re) and [opentracker-synths](https://github.com/opentracker-fw/opentracker-synths) through a shim that hosts their engine interface. CHIP is Polyend's own open Chiptune voice. PHZ is a phase distortion engine written for this project from the public manual.
+- **16 synth engines** in one image: ACD, FAT, VAP, WTFM, PERC, CHIP, JU6, PHZ, FM4, D-Type, CS-Type, A-Type, T-Type, 8-Type, B-Type and Arc-Type. Most come from [OpenTracker](https://github.com/sandlbn/polyend-tracker-re) and [opentracker-synths](https://github.com/opentracker-fw/opentracker-synths) through a shim that hosts their engine interface. CHIP is Polyend's own open Chiptune voice. PHZ is a phase distortion engine written for this project from the public manual.
 - **Polyphony and a governor.** Up to 4 voices per synth instrument, a shared voice pool (default 4, at most 8) and OpenTracker's governor, which drops voices when the audio block load gets too high.
 - **`.patch` files and pitch bend.** Patches load and save from `Patches/<ENGINE>/` on the SD card, including Polyend's factory patches. Pitch bend works from MIDI and from the Micro-tune FX.
 - **Lower idle audio CPU.** Synth parts with nothing sounding are skipped in the audio graph, idle voices send no data, the reverb and short delay sleep when silent, mixers skip empty inputs and one reverb buffer lives in internal SRAM. The details and the bench that checks the output stays bit identical are in `synth-open/README.md`.
-- **TRIM flash budget.** `TRIM=1` links with newlib-nano and builds the UI, the platform code and some cold code at `-Os`, so 17 engines fit in the original's flash. The release image ends at 0xFB7C0 (1,030,080 bytes of 1,044,480 allowed). The last 4 KB sector stays free.
+- **TRIM flash budget.** `TRIM=1` links with newlib-nano and builds the UI, the platform code and some cold code at `-Os`, so 16 engines fit in the original's flash. The release image ends at 0xF9F90 (1,023,888 bytes of 1,044,480 allowed). The last 4 KB sector stays free.
 - **Fixes.** Three out of bounds writes to `label[8]` arrays in the UI are fixed in all builds.
 
 Not available: Polyend's DIRT and Shaping engines (they exist only in the closed library). A project that uses an engine missing from the build gets that part reset to defaults on load.
@@ -33,9 +33,9 @@ Do not rename the file. The original's bootloader lists only names that start wi
 You need `make`, `python3` and the GNU Arm Embedded Toolchain 10.3-2021.10. Put it in `./agt/10.3/` or pass `TOOLCHAIN=/path/to/arm-none-eabi-`. Build only the original, `make all` also builds the Tracker+ and the Mini.
 
 ```bash
-# the 17 engine release image, build/PolyendTracker_FF_1.0.0.ptf
+# the 16 engine release image, build/PolyendTracker_FF_1.0.0.ptf
 make original SYNTH_OPEN=1 TRIM=1 \
-  SYNTH_ENGINES="ACD FAT VAP WTFM PERC CHIP JU6 PHZ FM4 DTYPE CSTYPE ATYPE TTYPE 8TYPE HANDTYPE BTYPE ARCTYPE"
+  SYNTH_ENGINES="ACD FAT VAP WTFM PERC CHIP JU6 PHZ FM4 DTYPE CSTYPE ATYPE TTYPE 8TYPE BTYPE ARCTYPE"
 
 # folder and zip with the .ptf, LICENSE, NOTICE.md and every third party license text, in build/release/
 make package-release SYNTH_OPEN=1 TRIM=1

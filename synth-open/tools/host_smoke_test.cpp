@@ -309,6 +309,26 @@ int main() {
             "an absent type lists no patches and has no instrument name");
       check(!ps->loadPatch("absent", *pp, true) && !ws->loadPatch("0", *pp, true), "loading into the fallback patch from an absent engine or missing files fails cleanly");
     }
+#ifndef SYNTH_ENGINE_HANDTYPE
+    // Hand-Type (stored 15, type id and .patch engine 0x87) is in the source tree but not in the release set: a project or a
+    // patch from a build that has it must be as harmless as any other absent engine
+    {
+      const InstrumentTypeId kHand = static_cast<InstrumentTypeId>(0x87);
+      auto src = ps->createPatch(kLead); open::PatchData pd; static_cast<open::OpenPatch&>(*src).exportData(pd);
+      pd.engine = 0x87; uint8_t pbuf[4096]; const size_t pn = open::encodePatch(pd, pbuf, sizeof(pbuf));
+      bool refused = pn > 0, untouched = true;
+      for (const auto& kd : kinds) {
+        auto t = ps->createPatch(int(kd.id)); const float b0 = *t->getParamValue(0);
+        mp->files[std::string(open::engineDefForType(int(kd.id))->name) + "/hand.patch"].assign(pbuf, pbuf + pn);
+        refused = refused && !ps->loadPatch("hand", *t, true); untouched = untouched && *t->getParamValue(0) == b0;
+      }
+      auto hp = ps->createPatch(int(kHand));
+      check(refused && untouched && open::typeForEngineId(0x87) == -1 && open::engineDefForType(int(kHand)) == nullptr,
+            "Hand-Type is not in this build: its .patch is refused by every engine and its ids are unknown");
+      check(hp && hp->getMetadata().instrumentTypeId == kLead && ps->listPatchesByType(int(kHand)).empty() && !ws->loadPatch("0", *hp, true),
+            "a Hand-Type part falls back to an Init patch of the first engine, lists nothing and loads nothing");
+    }
+#endif
     // workspace store: flat N.patch, as Synth::savePatchToWorkspace / loadPatchFromWorkspace use it
     auto w0 = ws->createPatch(kLead); const float w0v = float(w0->getMetadata().params[0].maxValue); w0->setParamValue(0, w0v, Patch::ParamChangeSource::kKnob);
     check(ws->savePatch("0", *w0) && mw->files.count("0.patch") == 1, "workspace store writes Workspace/0.patch (no type folder)");

@@ -68,7 +68,7 @@ header platforms/mk66/3rdparty/Audio/input_i2s.h            LICENSE-PJRC-AudioLi
 rev="$(git -C "$root" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 cat > "$dest/README-RELEASE.txt" <<EOF
 tracker-ff  ($name)
-Unofficial community firmware for the original Polyend Tracker (MK66), a fork of Polyend's Tracker Community Edition with 17 open synth engines.
+Unofficial community firmware for the original Polyend Tracker (MK66), a fork of Polyend's Tracker Community Edition with 16 open synth engines.
 Not affiliated with, endorsed by or supported by Polyend. Free, non-commercial.
 Built from commit $rev of https://github.com/sbialy/tracker-ff (fork of https://github.com/polyend/tracker-ce).
 

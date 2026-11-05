@@ -7,6 +7,7 @@
 # is compiled with one -DSYNTH_ENGINE_<NAME> per selected engine. Unlisted engines are neither compiled nor linked.
 #
 # The OpenTracker 3.x module engines (JU6, FM4, DTYPE, CSTYPE, ATYPE, TTYPE, 8TYPE, HANDTYPE, BTYPE, ARCTYPE) live in ot-synths/<module>/.
+# The release image is built with every engine except HANDTYPE (README, Build). HANDTYPE stays in this list so it can still be picked.
 # Adding an engine: one line in SYNTH_ENGINES_ALL, one SYNTH_ENGINE_SRCS_<NAME> line, one entry in engine_list.h
 # (and its sources + EngineDef). Keep the canonical order: it is the order of the model list on screen.
 
