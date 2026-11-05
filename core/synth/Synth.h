@@ -10,6 +10,7 @@
 #include "mtStructs.h"
 #ifdef FEATURE_SYNTH_OPEN
 #include "open_load.h"
+#include "open_bankcopy.h"
 #endif
 #include <array>
 #include <cassert>
@@ -106,11 +107,17 @@ class Synth
     bool saveDirtyWorkspacePatches();
     // False: a file could not be copied or removed (SYNTH_OPEN: the files already in the destination are as they were, or complete
     // copies). The caller reports it and does not call the project saved or loaded.
-    // `projectOpen`: the copy is the project open one (project folder -> Workspace). SYNTH_OPEN: a failed open copy latches "bank copy
-    // incomplete" per part, and while it is latched the save copy (Workspace -> project folder) prunes nothing in the project folder.
+    // `projectOpen`: the copy is the project open one (project folder -> Workspace). SYNTH_OPEN: it records per file what it could not copy
+    // (BankMissing), and while a file is recorded the save copy (Workspace -> project folder) leaves that file of the project folder alone.
     bool copyWorkspacePatches(const char* sourceProjectPath, const char* destinationProjectPath, bool projectOpen = false);
 #ifdef FEATURE_SYNTH_OPEN
-    void clearBankCopyIncomplete() { bankCopyIncomplete = 0; } // a new project: the Workspace is complete by definition
+    // The bank copy marker (Workspace/bankcopy.missing, open_bankcopy.h): the files a failed project open did not copy. Project open calls
+    // beginBankCopy before and finishBankCopy after the copy, the Workspace load (boot and open) calls loadBankMarker, a new project
+    // calls clearBankMarker.
+    void beginBankCopy();
+    void finishBankCopy();
+    void loadBankMarker();
+    void clearBankMarker();
 #endif
     void setPatchDirty(int part) { parts[part].patchDirty = true; };
     bool isAnyPatchDirty();
@@ -195,7 +202,7 @@ class Synth
     };
     std::array<Part, kSynthParts> parts;
 #ifdef FEATURE_SYNTH_OPEN
-    uint32_t bankCopyIncomplete = 0; // bit per part: the last project open could not copy its bank completely, the Workspace may lack files
+    polysynth::open::BankMissing bankMissing; // per part, the bank files that the last project open did not copy (open_bankcopy.h)
 #endif
     std::shared_ptr<polysynth::Synth> synth;
     std::unique_ptr<polysynth::PatchPool> patchPool;

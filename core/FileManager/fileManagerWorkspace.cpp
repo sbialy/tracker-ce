@@ -17,7 +17,7 @@ bool cFileManager::createNewProjectInWorkspace()
 #if defined(FEATURE_SYNTH_OPEN) && FILEMANAGER_HANDLE_SYNTH == 1
     if (getSynth())
     {
-        getSynth()->clearBankCopyIncomplete(); // an empty Workspace is complete, a later save may prune again
+        getSynth()->clearBankMarker(); // an empty Workspace is complete, nothing of a project folder is missing in it
     }
 #endif
 

@@ -111,6 +111,7 @@ enum class SlotSelect
     kCopied,      // no file: the live patch stays and becomes the new slot (no file until it is saved)
     kOtherEngine, // a file of another engine sits there: nothing changed, the slot is not usable with this engine
     kError,       // the file could not be read: nothing changed
+    kUnavailable, // Synth::selectPatchSlot: the project has this slot but a failed project open did not copy it (BankMissing), nothing changed
     kSaveFailed,  // Synth::selectPatchSlot: the open slot is edited and its file could not be written: nothing changed, it stays open
 };
 // Main thread. Open slot `slot`. The caller saved the open slot first when it was dirty. Macros of the live patch come from

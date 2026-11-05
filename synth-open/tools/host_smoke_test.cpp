@@ -1047,9 +1047,13 @@ int main() {
       // R3-B1: project open (ProjectOpen::openProjectFinish): a bank copy that fails twice loads the requested project like stock, it never
       // falls into the new empty project (that deletes the copied Workspace), and the copy gets exactly one retry
       {
-        auto flow = [](int copyOk, bool workspaceOpens, int& copies, int& created, int& opens, int& settled) {
+        std::string order;
+        auto flow = [&order](int copyOk, bool workspaceOpens, int& copies, int& created, int& opens, int& settled) {
           copies = created = opens = settled = 0;
-          open::openProjectAfterBankCopy([&]() { return ++copies > copyOk; },       // the first `copyOk` calls fail
+          order.clear();
+          open::openProjectAfterBankCopy([&]() { order += 'b'; },
+                                         [&]() { order += 'c'; return ++copies > copyOk; },       // the first `copyOk` calls fail
+                                         [&]() { order += 'f'; },
                                          [&]() { settled++; },
                                          [&]() { opens++; return workspaceOpens || created > 0; },
                                          [&]() { created++; });
@@ -1057,6 +1061,7 @@ int main() {
         int copies, created, opens, settled;
         flow(2, true, copies, created, opens, settled);                                            // fails twice: loads the requested project
         bool ok = copies == 2 && created == 0 && opens == 1 && settled == 1;
+        ok = ok && order == "bccf";                                                                  // the marker is begun before the copy and finished after the last attempt
         flow(1, true, copies, created, opens, settled);                                            // a hiccup, the retry works
         ok = ok && copies == 2 && created == 0 && opens == 1;
         flow(0, true, copies, created, opens, settled);                                            // no error: one copy only
@@ -1065,47 +1070,116 @@ int main() {
         ok = ok && created == 1 && opens == 2;
         check(ok, "R3-B1: a bank copy that fails twice still loads the requested project, the empty project stays for a Workspace that cannot open");
       }
-      // R4: a failed bank copy at project open latches "bank copy incomplete" per part, and the next project save copies what the Workspace has
-      // and prunes nothing in Projects for that part. The latch ends at the next open that copies the part completely or at a new project
+      // R4: a failed bank copy at project open leaves a marker in the Workspace that lists the files it did not copy. Saves, in this session
+      // and after a reboot, never touch those files in Projects, the selector refuses those slots, and a complete open or a new project clears it
       {
         using Files = MemBankOps::Files;
         const int P = open::kPatchBankParts;
+        // the card side of the marker: one file that can be made to fail
+        struct MemMarkerIo {
+          bool has = false; std::vector<uint8_t> bytes; bool failStore = false, failLoad = false, failErase = false; int stores = 0, erases = 0;
+          open::Presence load(uint8_t* buf, size_t cap, size_t& n) {
+            n = 0; if (failLoad) return open::Presence::kUnknown; if (!has) return open::Presence::kAbsent;
+            n = std::min(cap, bytes.size()); std::memcpy(buf, bytes.data(), n); return open::Presence::kPresent; }
+          bool store(const uint8_t* d, size_t n) { if (failStore) return false; has = true; bytes.assign(d, d + n); stores++; return true; }
+          bool erase() { erases++; if (failErase) return false; has = false; bytes.clear(); return true; }
+        };
         Files project, work;
         auto fill = [&]() {
           project.clear(); work.clear();
           for (int p = 0; p < P; p++) for (int s : { 0, 3, 5, 9, open::kBackupSlot }) project[open::bankFileName(p, s)] = { uint8_t(p), uint8_t(s) };
           for (int p = 0; p < P; p++) project[open::bankFileName(p, open::kBackupSlot + 1)] = { uint8_t(p), 'n' };   // the .names file
-          work[open::bankFileName(0, 0)] = { 9, 9 };                                       // the Workspace still has an older slot 0
         };
-        uint32_t latch = 0;
-        auto openCopy = [&](const char* failCopy) { MemBankOps o{ &project, &work, failCopy }; return open::copyBank(o, P, "S", "D", true, latch); };
-        auto saveCopy = [&](MemBankOps& o) { return open::copyBank(o, P, "S", "D", false, latch); };
-        fill();
-        bool ok = !openCopy("0-3.patch") && latch == 1u;                                  // the copy stops at slot 3 of part 0, parts 1.. were copied
-        ok = ok && !work.count("0-5.patch") && !work.count("0-b.patch") && work.count("1-5.patch");
-        const Files before = project;
-        MemBankOps sv{ &work, &project, "" };                                             // the save: Workspace -> Projects
-        ok = ok && saveCopy(sv) && sv.removed == 0 && project.count("0-3.patch") && project.count("0-5.patch") && project.count("0-9.patch")
-             && project.count("0-b.patch") && project.count("0.names") && project["0.patch"] == work["0.patch"];   // copied what exists, deleted nothing
-        ok = ok && latch == 1u;                                                           // a save does not clear it
-        ok = ok && saveCopy(sv) && sv.removed == 0 && project.count("0-5.patch");        // and a second save still keeps them
-        // the other parts are not affected: a slot the Workspace lacks is pruned as before
-        work.erase("1-5.patch"); ok = ok && saveCopy(sv) && !project.count("1-5.patch") && project.count("0-5.patch");
-        check(ok, "R4: after a failed open copy the save copies what the Workspace has and prunes nothing in Projects for that part");
-        // a later open that copies completely clears the latch, then the save prunes again
-        fill(); latch = 0; ok = !openCopy("0-3.patch") && latch == 1u;
-        ok = ok && openCopy("") && latch == 0u && work.count("0-5.patch");                // the retry of openProjectAfterBankCopy works
-        work.erase("0-5.patch"); MemBankOps sv2{ &work, &project, "" };
-        ok = ok && saveCopy(sv2) && !project.count("0-5.patch") && sv2.removed > 0;       // a complete Workspace prunes
-        // a part that fails twice stays latched across both attempts, a new project clears it
-        fill(); latch = 0; ok = ok && !openCopy("0-3.patch") && !openCopy("0-3.patch") && latch == 1u;
-        latch = 0;                                                                         // FileManager::createNewProjectInWorkspace
-        work.clear(); MemBankOps sv3{ &work, &project, "" };
-        ok = ok && saveCopy(sv3) && !project.count("0-5.patch");
-        // a failed lookup or copy during a guarded save is reported and still deletes nothing
-        fill(); latch = 0; ok = ok && !openCopy("0-3.patch"); MemBankOps sv4{ &work, &project, "0.patch" };
-        ok = ok && !saveCopy(sv4) && sv4.removed == 0 && project.count("0-5.patch") && project.count("0-b.patch") && latch == 1u;
-        check(ok, "R4: the latch ends at a complete open copy or a new project, never at a save, and a failing guarded save deletes nothing");
+        const Files original = [&]() { fill(); return project; }();
+        // ProjectOpen::openProjectFinish over the in-memory card: begin, copy (one retry), finish
+        auto openProject = [&](MemMarkerIo& io, open::BankMissing& m, const char* failCopy) {
+          fill();
+          MemBankOps o{ &project, &work, failCopy };
+          open::openProjectAfterBankCopy([&]() { open::bankMarkerBegin(io, m); },
+                                         [&]() { return open::copyBank(o, P, "S", "D", true, m); },
+                                         [&]() { open::bankMarkerFinish(io, m); },
+                                         [&]() {}, [&]() { open::bankMarkerLoad(io, m); return true; }, [&]() {});   // the load of the Workspace reads the marker
+        };
+        auto save = [&](open::BankMissing& m, int* removed = nullptr) {
+          MemBankOps sv{ &work, &project, "" }; const bool r = open::copyBank(sv, P, "S", "D", false, m); if (removed) *removed = sv.removed; return r; };
+        const uint32_t bit3 = 1u << 3, bit5 = 1u << 5;
+
+        // the marker lists exactly the files that were not copied, the others of the part were copied (a failure does not stop the copy)
+        MemMarkerIo card; open::BankMissing m;
+        openProject(card, m, "0-3.patch");
+        bool ok = m.part[0] == bit3 && m.part[1] == 0 && m.part[2] == 0 && !m.ramOnly && card.has;
+        ok = ok && !work.count("0-3.patch") && work.count("0-5.patch") && work.count("0-b.patch") && work.count("0.names") && work.count("1-5.patch");
+        open::BankMissing parsed; ok = ok && open::bankMarkerParse(card.bytes.data(), card.bytes.size(), parsed) && parsed.part[0] == bit3 && parsed.part[1] == 0;
+        check(ok, "R4: a failed open copy writes a marker that lists exactly the files it did not copy");
+        // R4-B1: a reboot forgets the RAM, the marker brings the files back and the next save leaves them in Projects
+        open::BankMissing control;                                                          // what the RAM-only guard of 65eee54 had after a reboot
+        int removed = 0; const Files workBefore = work;
+        ok = save(control, &removed) && !project.count("0-3.patch") && removed > 0;         // control: without the marker the save prunes the original
+        project = original; work = workBefore;
+        open::BankMissing rebooted; open::bankMarkerLoad(card, rebooted);
+        ok = ok && rebooted.part[0] == bit3 && save(rebooted, &removed) && removed == 0 && project == original && rebooted.part[0] == bit3;   // kept, and the save did not clear it
+        check(ok, "R4-B1: after a reboot the marker keeps the save from pruning the originals that the open did not copy");
+        // R4-B2: the slot is refused in the selector, no file appears, and a save with the edit does not replace the original in Projects
+        auto selectAndEdit = [&](const open::BankMissing& mm, int slot) {   // Synth::selectPatchSlot, then the edit is saved as the slot's Workspace file
+          if (open::slotUnavailable(mm, 0, slot)) return false;
+          work[open::bankFileName(0, slot)] = { 99, 99 };                                  // copy-current plus edit
+          return true; };
+        openProject(card, m, "0-5.patch");
+        ok = m.part[0] == bit5 && !selectAndEdit(m, 5) && !work.count("0-5.patch") && selectAndEdit(m, 7) && work.count("0-7.patch");   // other slots still work
+        ok = ok && !open::slotUnavailable(m, 0, 0) && !open::slotUnavailable(m, 1, 5) && !open::slotUnavailable(m, 0, 16);
+        work.erase("0-7.patch");
+        ok = ok && save(m, &removed) && removed == 0 && project == original;
+        open::BankMissing none; work["0-5.patch"] = { 99, 99 };                           // control: no guard, the file that the selector made goes over the original
+        ok = ok && save(none) && project["0-5.patch"] == std::vector<uint8_t>{ 99, 99 };
+        check(ok, "R4-B2: a slot that the open did not copy is refused by the selector and its original in Projects is never replaced");
+        // a protected slot 0 that has a Workspace file (the Init fallback of the load) is not copied over the original either, and the save reports it
+        openProject(card, m, "0.patch"); work["0.patch"] = { 9, 9 };
+        ok = m.part[0] == 1u && !save(m, &removed) && project == original && removed == 0;
+        // the protected backup and names files are skipped quietly, the rest of the part is saved
+        openProject(card, m, "0-b.patch"); work["0.patch"] = { 5, 5 };
+        ok = ok && m.part[0] == (1u << open::kBackupSlot) && save(m) && project["0.patch"] == std::vector<uint8_t>{ 5, 5 } && project["0-b.patch"] == original.at("0-b.patch");
+        check(ok, "R4: a protected slot 0 with a file blocks the save of it and reports, a protected backup is skipped, everything else is saved");
+        // the marker ends at an open that copies every file, and at a new project
+        openProject(card, m, "0-5.patch");
+        ok = card.has && m.part[0] == bit5;
+        openProject(card, m, "");
+        ok = ok && !card.has && m.part[0] == 0 && !m.ramOnly && work.count("0-5.patch");
+        open::BankMissing again; open::bankMarkerLoad(card, again);
+        work.erase("0-5.patch"); ok = ok && again.part[0] == 0 && save(again, &removed) && removed > 0 && !project.count("0-5.patch");   // a complete Workspace prunes again
+        openProject(card, m, "0-5.patch"); ok = ok && card.has;
+        open::bankMarkerClear(card, m);                                                      // a new project
+        ok = ok && !card.has && m.part[0] == 0 && !m.ramOnly;
+        check(ok, "R4: a complete reopen or a new project clears the marker, saves prune again afterwards");
+        // the marker could not be written: the strictest rule for the session, in RAM
+        MemMarkerIo bad; bad.failStore = true; open::BankMissing mb;
+        openProject(bad, mb, "0-3.patch");
+        ok = mb.ramOnly && !bad.has && mb.part[0] == open::kBankAllFiles && mb.part[1] == 0 && mb.part[2] == 0;   // the load did not replace them from the (empty) card
+        work["0-8.patch"] = { 77, 77 };                                                    // an edit that appeared in the Workspace meanwhile
+        project["0-8.patch"] = { 8, 8 }; const Files projectBefore = project;
+        ok = ok && !save(mb, &removed) && project == projectBefore && removed == 0;
+        MemMarkerIo bad2; bad2.failStore = true; open::BankMissing mc;                      // the copy worked, only the marker cannot be written
+        openProject(bad2, mc, "");
+        ok = ok && !mc.ramOnly && mc.part[0] == 0 && mc.part[1] == 0;
+        check(ok, "R4: when the marker cannot be written every file of the affected part is protected for the session, a copy that worked needs no marker");
+        // power lost in the middle of the copy: the marker written before it makes the next boot protect everything
+        MemMarkerIo cut; open::BankMissing mp;
+        fill(); open::bankMarkerBegin(cut, mp);                                              // ... and the power goes
+        open::BankMissing boot; open::bankMarkerLoad(cut, boot);
+        work = { { "0.patch", { 1, 1 } } }; project = original;
+        ok = boot.part[0] == open::kBankAllFiles && boot.part[1] == open::kBankAllFiles && boot.part[2] == open::kBankAllFiles && !save(boot, &removed) && removed == 0 && project == original;
+        // a marker that is damaged or cannot be read guards everything, the next open ends it
+        MemMarkerIo junk; junk.has = true; junk.bytes = { 't', 'f', 'f', 'x' }; open::BankMissing mj; open::bankMarkerLoad(junk, mj);
+        ok = ok && mj.part[0] == open::kBankAllFiles && mj.part[2] == open::kBankAllFiles;
+        MemMarkerIo unreadable; unreadable.failLoad = true; open::BankMissing mu; open::bankMarkerLoad(unreadable, mu);
+        ok = ok && mu.part[1] == open::kBankAllFiles;
+        const uint8_t tooHigh[] = "tffmissing 1\n0=40000\n"; const uint8_t badPart[] = "tffmissing 1\n3=1\n"; const uint8_t noNl[] = "tffmissing 1\n0=8";
+        open::BankMissing t1;
+        ok = ok && !open::bankMarkerParse(tooHigh, sizeof(tooHigh) - 1, t1) && !open::bankMarkerParse(badPart, sizeof(badPart) - 1, t1) && !open::bankMarkerParse(noNl, sizeof(noNl) - 1, t1);
+        open::BankMissing full; for (int p = 0; p < P; p++) full.part[p] = open::kBankAllFiles;
+        uint8_t enc[open::kBankMarkerMax]; const size_t en = open::bankMarkerEncode(full, enc);
+        open::BankMissing back; ok = ok && en <= open::kBankMarkerMax && open::bankMarkerParse(enc, en, back) && back.part[0] == open::kBankAllFiles && back.part[2] == open::kBankAllFiles;
+        open::BankMissing empty; const size_t ee = open::bankMarkerEncode(empty, enc); ok = ok && open::bankMarkerParse(enc, ee, back) && back.part[0] == 0;
+        check(ok, "R4: a power loss during the copy, a damaged or unreadable marker protect everything, the codec round trips and rejects bad files");
       }
       // R3-B3: the destination paths of the FileManager go up to PATCH_SIZE 255 (254 characters): replace and recovery work for them,
       // the old 128 B buffer refused every path of 124 characters or more

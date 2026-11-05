@@ -168,6 +168,9 @@ void WorkspaceProjectLoad::loadProjectFromWorkspaceFinish()
 
 #if FILEMANAGER_HANDLE_SYNTH == 1
     newFileManager.getSynth()->updateToSettings(mtProject.values, true);
+#ifdef FEATURE_SYNTH_OPEN
+    newFileManager.getSynth()->loadBankMarker(); // boot and project open: the files a failed open left out of the Workspace
+#endif
     for (int part = 0; part < kSynthParts; part++)
     {
         if (!newFileManager.getSynth()->loadPatchFromWorkspace(part))

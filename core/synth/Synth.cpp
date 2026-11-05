@@ -392,6 +392,10 @@ polysynth::open::SlotSelect Synth::selectPatchSlot(int part, int slot)
     {
         return SlotSelect::kSame;
     }
+    if (polysynth::open::slotUnavailable(bankMissing, part, slot))
+    {
+        return SlotSelect::kUnavailable; // the project has it, the failed open did not copy it: no empty slot, no copy of this sound, no file
+    }
 
     if (parts[part].patchDirty && !savePatchToWorkspace(part)) // a dirty slot is written when it is left
     {
@@ -737,6 +741,50 @@ struct BankCopyOps
 } // namespace
 #endif
 
+#ifdef FEATURE_SYNTH_OPEN
+namespace
+{
+// The card side of the bank copy marker (open_bankcopy.h) over the Workspace store
+struct BankMarkerIo
+{
+    polysynth::PatchStore& ws;
+
+    polysynth::open::Presence load(uint8_t* buf, size_t cap, size_t& n) { return polysynth::open::bankMarkerLoadRaw(ws, buf, cap, n); }
+    bool store(const uint8_t* data, size_t n) { return polysynth::open::bankMarkerStoreRaw(ws, data, n); }
+    bool erase() { return polysynth::open::bankMarkerEraseRaw(ws); }
+};
+} // namespace
+
+void Synth::beginBankCopy()
+{
+    BankMarkerIo io{ *patchStoreWorkspace };
+    polysynth::open::bankMarkerBegin(io, bankMissing);
+}
+
+void Synth::finishBankCopy()
+{
+    BankMarkerIo io{ *patchStoreWorkspace };
+    polysynth::open::bankMarkerFinish(io, bankMissing);
+}
+
+void Synth::loadBankMarker()
+{
+    BankMarkerIo io{ *patchStoreWorkspace };
+    polysynth::open::bankMarkerLoad(io, bankMissing);
+}
+
+void Synth::clearBankMarker()
+{
+    if (!patchStoreWorkspace)
+    {
+        bankMissing = {};
+        return;
+    }
+    BankMarkerIo io{ *patchStoreWorkspace };
+    polysynth::open::bankMarkerClear(io, bankMissing);
+}
+#endif
+
 bool Synth::copyWorkspacePatches(const char* sourceProjectPath, const char* destinationProjectPath, bool projectOpen)
 {
 #ifdef FEATURE_SYNTH_OPEN
@@ -746,8 +794,8 @@ bool Synth::copyWorkspacePatches(const char* sourceProjectPath, const char* dest
     const std::string srcDir = sourceProjectPath;
     const std::string dstDir = destinationProjectPath;
     BankCopyOps ops{ filesystem };
-    // After a failed open copy the Workspace may lack files the project has: the save then deletes nothing in the project folder (copyBank).
-    return polysynth::open::copyBank(ops, kSynthParts, srcDir, dstDir, projectOpen, bankCopyIncomplete);
+    // Open: records per file what could not be copied. Save: the recorded files of the project folder stay as they are (copyBank).
+    return polysynth::open::copyBank(ops, kSynthParts, srcDir, dstDir, projectOpen, bankMissing);
 #else
     for (int part = 0; part < kSynthParts; part++)
     {
