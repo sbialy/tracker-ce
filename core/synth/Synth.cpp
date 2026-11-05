@@ -223,6 +223,7 @@ bool Synth::loadPatchFromWorkspace(int part, std::optional<std::string> override
 {
     const bool fileLoaded = loadWorkspacePatch(part, std::move(overrideName));
     reloadPatchBank(part);
+    loadSlotNames(part);
     return fileLoaded;
 }
 
@@ -264,6 +265,32 @@ void Synth::reloadPatchBank(int part)
     {
         polysynth::open::patchBankPreload(part, *parts[part].patch, *patchStoreWorkspace);
     }
+}
+
+// Project load: the names of slots 1..15 from Workspace/<P>.names, "Unnamed" (empty here) for any slot the file does not name
+void Synth::loadSlotNames(int part)
+{
+    polysynth::open::SlotNames names;
+    polysynth::open::patchNamesRead(part, *patchStoreWorkspace, names); // missing or damaged: all empty
+    for (int slot = 1; slot < kPatchSlots; slot++)
+    {
+        parts[part].slotNames[slot] = names.name[slot];
+    }
+}
+
+void Synth::persistSlotNames(int part)
+{
+    polysynth::open::SlotNames names;
+    const int cur = getPatchSlot(part);
+    for (int slot = 1; slot < kPatchSlots; slot++)
+    {
+        const std::string& name = slot == cur ? parts[part].patchName : parts[part].slotNames[slot];
+        if (name != "Unnamed")
+        {
+            snprintf(names.name[slot], sizeof(names.name[slot]), "%s", name.c_str());
+        }
+    }
+    polysynth::open::patchNamesWrite(part, *patchStoreWorkspace, names);
 }
 
 bool Synth::applyPatchBankSlot(int part, int slot)
@@ -308,6 +335,7 @@ polysynth::open::SlotSelect Synth::selectPatchSlot(int part, int slot)
             parts[part].patchName = parts[part].slotNames[slot].empty() ? "Unnamed" : parts[part].slotNames[slot];
         }
         parts[part].patchDirty = false;
+        persistSlotNames(part);
     }
     return result;
 }
@@ -343,6 +371,9 @@ void Synth::saveDirtyWorkspacePatches()
         {
             savePatchToWorkspace(part);
         }
+#ifdef FEATURE_SYNTH_OPEN
+        persistSlotNames(part); // project save: the names go to the Workspace before it is copied to the project
+#endif
     }
 }
 
@@ -620,6 +651,21 @@ void Synth::copyWorkspacePatches(const char* sourceProjectPath, const char* dest
                 continue;
             }
             cFileTransfer::copyFile(filesystem, srcFile.c_str(), dstFile.c_str());
+        }
+        // the slot names of the part (<P>.names), carried and pruned like a slot file
+        {
+            char name[8];
+            polysynth::open::patchSlotName(part, 0, name);
+            std::string srcFile = fmt::format("{}\\{}{}", sourceProjectPath, name, polysynth::open::kSlotNamesExt);
+            std::string dstFile = fmt::format("{}\\{}{}", destinationProjectPath, name, polysynth::open::kSlotNamesExt);
+            if (filesystem->exists(srcFile.c_str()))
+            {
+                cFileTransfer::copyFile(filesystem, srcFile.c_str(), dstFile.c_str());
+            }
+            else if (filesystem->exists(dstFile.c_str()))
+            {
+                filesystem->remove(dstFile.c_str());
+            }
         }
 #else
         std::string srcFile =

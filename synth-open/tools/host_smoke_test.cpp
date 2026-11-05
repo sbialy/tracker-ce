@@ -445,6 +445,64 @@ int main() {
       check(nKinds < 2 || engineKeeps, "engine change: old slot files stay, are ignored and cannot be opened, empty slots still open");
       check(nKinds < 2 || engineBack, "engine change: switching back brings slots 1..15 of that engine back, slot 0 is the new Init");
     }
+    // ---- slot names side file <P>.names (open_slotnames.h codec, patchNamesRead / patchNamesWrite on the Workspace store)
+    {
+      mw->files.clear();
+      auto bytesOf = [](const char* t) { return std::vector<uint8_t>(t, t + std::strlen(t)); };
+      auto decode = [](const std::vector<uint8_t>& v, open::SlotNames& n) { return open::decodeSlotNames(v.data(), v.size(), n); };
+      open::SlotNames in; std::snprintf(in.name[1], sizeof(in.name[1]), "Warm Pad"); std::snprintf(in.name[12], sizeof(in.name[12]), "Bass 12");
+      std::snprintf(in.name[15], sizeof(in.name[15]), "%s", "0123456789012345678901234567890"); // 31 bytes, the longest
+      std::snprintf(in.name[0], sizeof(in.name[0]), "slot0 is never stored");
+      uint8_t buf[open::kSlotNamesFileMax]; const size_t n = open::encodeSlotNames(in, buf, sizeof(buf));
+      const std::string text(reinterpret_cast<char*>(buf), n);
+      check(text == "tffnames 1\n1=Warm Pad\n12=Bass 12\n15=0123456789012345678901234567890\n", "slot names file: text header, one slot=name line per named slot 1..15, slot 0 left out");
+      open::SlotNames out; const bool dec = open::decodeSlotNames(buf, n, out);
+      bool same = dec; for (int sl = 1; sl < 16; sl++) same = same && std::strcmp(in.name[sl], out.name[sl]) == 0;
+      check(same && out.name[0][0] == 0, "slot names file: encode then decode gives the same names (all 15 slots compared)");
+      open::SlotNames full; for (int sl = 1; sl < 16; sl++) std::memset(full.name[sl], 'x', open::kSlotNameMax);
+      check(open::encodeSlotNames(full, buf, sizeof(buf)) <= open::kSlotNamesFileMax && open::encodeSlotNames(full, buf, 5) == 0 && open::encodeSlotNames(full, buf, 40) == 0,
+            "slot names file: the biggest file fits kSlotNamesFileMax, a too small buffer writes nothing");
+      open::SlotNames cut; std::memset(cut.name[2], 'y', open::kSlotNameMax);
+      const size_t cn = open::encodeSlotNames(cut, buf, sizeof(buf));
+      check(cn == 11 + 2 + 31 + 1, "slot names file: a 31 byte name is written whole");
+      // bounded reads of damaged files: nothing crashes, nothing past a limit is taken, good lines still count
+      bool bad = true; open::SlotNames d;
+      bad = bad && !decode(bytesOf(""), d) && !open::anySlotName(d);
+      bad = bad && !decode(bytesOf("garbage\n1=Name\n"), d) && !open::anySlotName(d);                       // no header: the file is ignored whole
+      bad = bad && !decode(bytesOf("tffnames 2\n1=Name\n"), d) && !open::anySlotName(d);                    // other version
+      bad = bad && decode(bytesOf("tffnames 1\n"), d) && !open::anySlotName(d);                              // header only
+      bad = bad && decode(bytesOf("tffnames 1\n0=zero\n16=sixteen\n99=x\n-1=neg\n1x=bad\n=none\n7=\n8\n"), d) && !open::anySlotName(d); // slot 0, 16.., malformed, empty name
+      bad = bad && decode(bytesOf("tffnames 1\n3=0123456789012345678901234567890X\n"), d) && !open::anySlotName(d);         // 32 bytes: too long, skipped
+      bad = bad && decode(bytesOf("tffnames 1\n4=ab\x01" "cd\n5=ok\n"), d) && d.name[4][0] == 0 && std::strcmp(d.name[5], "ok") == 0;   // control character: that line is skipped
+      bad = bad && decode(bytesOf("tffnames 1\r\n2=Crlf\r\n"), d) == false;                                   // the header is exact: a CRLF file is not ours
+      bad = bad && decode(bytesOf("tffnames 1\n2=Crlf\r\n6=Last"), d) && std::strcmp(d.name[2], "Crlf") == 0 && std::strcmp(d.name[6], "Last") == 0; // CR tolerated, no final newline
+      bad = bad && decode(bytesOf("tffnames 1\n9=first\n9=second\n"), d) && std::strcmp(d.name[9], "second") == 0;           // duplicate: the last one
+      { std::vector<uint8_t> big = bytesOf("tffnames 1\n"); while (big.size() < 5000) { auto l = bytesOf("1=a\n"); big.insert(big.end(), l.begin(), l.end()); }
+        big.insert(big.end(), 3000, 'Z'); bad = bad && decode(big, d) && std::strcmp(d.name[1], "a") == 0; }                  // 8000 bytes: read stops at kSlotNamesFileMax
+      { uint32_t seed = 12345; for (int round = 0; round < 3000; round++) { std::vector<uint8_t> r(size_t(seed % 700)); for (auto& b : r) { seed = seed * 1664525u + 1013904223u; b = uint8_t(seed >> 24); }
+          if (round % 2 == 0 && r.size() > 11) std::memcpy(r.data(), "tffnames 1\n", 11);
+          decode(r, d); for (int sl = 0; sl < 16; sl++) bad = bad && std::strlen(d.name[sl]) <= open::kSlotNameMax; } }          // random bytes, half of them behind a valid header
+      check(bad, "slot names file: missing, empty, foreign, truncated and random files give no name or only the valid lines, names never pass 31 bytes");
+      // the Workspace store: Workspace/<P>.names
+      mw->files.clear(); mw->files["0.patch"] = bytesOf("stand-in patch bytes"); mw->files["0-1.patch"] = bytesOf("stand-in slot 1");
+      const auto patchesBefore = mw->files;
+      open::SlotNames back;
+      bool io = !open::patchNamesRead(0, *ws, back) && !open::anySlotName(back);                                 // no file: unnamed, no crash
+      io = io && open::patchNamesWrite(1, *ws, open::SlotNames()) && mw->files.count("1.names") == 0;           // nothing named and no file: nothing written
+      io = io && open::patchNamesWrite(0, *ws, in) && mw->files.count("0.names") == 1 && mw->files.count("1.names") == 0;
+      io = io && open::patchNamesRead(0, *ws, back) && std::strcmp(back.name[1], "Warm Pad") == 0 && std::strcmp(back.name[12], "Bass 12") == 0 && std::strcmp(back.name[15], in.name[15]) == 0 && back.name[2][0] == 0;
+      io = io && !open::patchNamesRead(1, *ws, back) && !open::anySlotName(back);                                // another part has its own file
+      open::SlotNames one; std::snprintf(one.name[1], sizeof(one.name[1]), "Renamed");
+      io = io && open::patchNamesWrite(0, *ws, one) && open::patchNamesRead(0, *ws, back) && std::strcmp(back.name[1], "Renamed") == 0 && back.name[12][0] == 0; // a rewrite replaces the whole file
+      io = io && open::patchNamesWrite(0, *ws, open::SlotNames()) && mw->files["0.names"] == bytesOf("tffnames 1\n") && open::patchNamesRead(0, *ws, back) && !open::anySlotName(back); // all names cleared: the file is corrected, not left stale
+      mw->files["0.names"] = bytesOf("tffnames 1\n1=Fine\n\xff\xfe\x00\x01 junk"); io = io && open::patchNamesRead(0, *ws, back) && std::strcmp(back.name[1], "Fine") == 0;
+      mw->files["0.names"] = std::vector<uint8_t>(100000, 'q'); io = io && !open::patchNamesRead(0, *ws, back) && !open::anySlotName(back);   // a huge foreign file is read up to the cap and refused
+      mw->files["0.names"].clear(); io = io && !open::patchNamesRead(0, *ws, back);
+      bool untouched = true; for (const auto& [k, v] : patchesBefore) untouched = untouched && mw->files.count(k) && mw->files[k] == v;
+      check(io, "slot names: Workspace/<P>.names is written and read per part, a missing, empty or damaged file reads as no names, an unnamed part gets no file");
+      check(untouched && mw->files.count("0.names") == 1, "slot names: the side file never touches a .patch file (stock files stay byte identical)");
+      mw->files.clear();
+    }
 #ifdef OT_ORACLE
     // OpenTracker's own codec as oracle: its Init patches load here and our files decode and re-encode there byte for byte
     bool oraOk = true; int engIds[4] = { ot::kSynthEngineAcd, ot::kSynthEngineFat, ot::kSynthEngineVap, ot::kSynthEngineWtfm };

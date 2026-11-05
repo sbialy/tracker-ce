@@ -680,6 +680,34 @@ class OpenPatchStore final : public PatchStore
         fs->close(*h);
         return decodePatch(buf, n, out) && typeForEngineId(out.engine) == typeId ? FileRead::kOk : FileRead::kOther;
     }
+    // A whole small file by its full name (with extension) from the store's folder, at most `cap` bytes. 0 when missing or empty.
+    size_t readRaw(const std::string& file, uint8_t* buf, size_t cap)
+    {
+        auto h = fs ? fs->open(file, FileSystem::OpenOptions::kNone) : std::nullopt;
+        if (!h)
+        {
+            return 0;
+        }
+        size_t n = 0;
+        int32_t got;
+        while (n < cap && (got = fs->read(*h, std::span<uint8_t>(buf + n, cap - n))) > 0)
+        {
+            n += size_t(got);
+        }
+        fs->close(*h);
+        return n;
+    }
+    bool writeRaw(const std::string& file, const uint8_t* data, size_t n)
+    {
+        auto h = fs ? fs->open(file, FileSystem::OpenOptions::kWrite) : std::nullopt;
+        if (!h)
+        {
+            return false;
+        }
+        const bool ok = fs->write(*h, std::span<const uint8_t>(data, n));
+        fs->close(*h);
+        return ok;
+    }
 
   private:
     std::string pathFor(const EngineDef* def, const std::string& name) const
@@ -737,6 +765,42 @@ void patchSlotName(int part, int slot, char (&out)[8])
     {
         snprintf(out, sizeof(out), "%d", part);
     }
+}
+
+// ------------------------------------------------------------- slot names side file (<P>.names, see open_slotnames.h)
+
+bool patchNamesRead(int part, PatchStore& workspace, SlotNames& out)
+{
+    out = SlotNames();
+    if (!partOk(part))
+    {
+        return false;
+    }
+    char base[8];
+    patchSlotName(part, 0, base);
+    auto buf = std::make_unique<uint8_t[]>(kSlotNamesFileMax);
+    const size_t n = static_cast<OpenPatchStore&>(workspace).readRaw(std::string(base) + kSlotNamesExt, buf.get(), kSlotNamesFileMax);
+    return n > 0 && decodeSlotNames(buf.get(), n, out);
+}
+
+bool patchNamesWrite(int part, PatchStore& workspace, const SlotNames& in)
+{
+    if (!partOk(part))
+    {
+        return false;
+    }
+    OpenPatchStore& st = static_cast<OpenPatchStore&>(workspace);
+    char base[8];
+    patchSlotName(part, 0, base);
+    const std::string file = std::string(base) + kSlotNamesExt;
+    uint8_t probe[1];
+    if (!anySlotName(in) && st.readRaw(file, probe, 1) == 0)
+    {
+        return true; // nothing to say and no file to correct: a project that never named a slot gets no side file
+    }
+    uint8_t buf[kSlotNamesFileMax];
+    const size_t n = encodeSlotNames(in, buf, sizeof(buf));
+    return n > 0 && st.writeRaw(file, buf, n);
 }
 
 void patchBankSetLive(int part, Patch* patch)

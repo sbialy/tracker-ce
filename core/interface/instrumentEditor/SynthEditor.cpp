@@ -335,6 +335,10 @@ static void functSynthConfirmLoad()
                     sizeof(SynthPartSettings::patchName));
     }
 
+#ifdef FEATURE_SYNTH_OPEN
+    IE->getSynth()->patchNameChanged(syntPartIdx);
+#endif
+
     IE->getSynth()->initSynthPartMacrosValues(syntPartIdx, mtProject.values.synthPart[syntPartIdx]);
     engine.refreshSynthInstrumentParams(mtProject.values.synthPart[syntPartIdx], syntPartIdx);
 
@@ -852,6 +856,9 @@ void cInstrumentEditor::initCurrentPatch()
                     IE->getSynth()->getPatchName(syntPartIdx).c_str(),
                     sizeof(SynthPartSettings::patchName));
     }
+#ifdef FEATURE_SYNTH_OPEN
+    IE->getSynth()->patchNameChanged(syntPartIdx);
+#endif
 
     newFileManager.setProjectStructChanged();
 

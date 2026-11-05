@@ -410,6 +410,9 @@ static void functSynthPatchSaveAsKeyboardConfirm()
                     IE->getSynth()->getPatchName(syntPartIdx).c_str(),
                     sizeof(SynthPartSettings::patchName));
     }
+#ifdef FEATURE_SYNTH_OPEN
+    IE->getSynth()->patchNameChanged(syntPartIdx);
+#endif
 
     newFileManager.setProjectStructChanged();
 

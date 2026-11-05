@@ -5,6 +5,8 @@
 
 #include <cstdint>
 
+#include "open_slotnames.h"
+
 namespace polysynth
 {
 class Patch;
@@ -48,6 +50,11 @@ void patchBankSetLive(int part, Patch* patch);
 void patchBankPreload(int part, Patch& patch, PatchStore& workspace);
 // The open slot of the part in the editor (0 when the bank was never built)
 int patchBankCurrent(int part);
+// Main thread: the side file <P>.names (open_slotnames.h) of the part in `workspace`, the names of slots 1..15. Read: false and all
+// names empty when the file is missing or damaged. Write: a part with no name and no file writes nothing.
+static_assert(kSlotNameSlots == kPatchBankSlots, "one name per slot");
+bool patchNamesRead(int part, PatchStore& workspace, SlotNames& out);
+bool patchNamesWrite(int part, PatchStore& workspace, const SlotNames& in);
 // Main thread: if the FX replaced the live values, put the edited values of the open slot back (call before reading or
 // saving the live patch, and before any edit).
 void patchBankRestore(int part);
