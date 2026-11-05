@@ -533,11 +533,6 @@ void cInstrumentEditor::changeSynthSlot(int16_t value)
         mtPopups.show(0, "Error loading slot");
         return;
     }
-    if (result == SlotSelect::kUnavailable)
-    {
-        mtPopups.show(0, "Slot unavailable", "(card error)"); // the project has it, the open did not copy it: reopen the project
-        return;
-    }
     if (result == SlotSelect::kSaveFailed)
     {
         mtPopups.show(0, "Error saving patch"); // the edited slot stays open

@@ -41,7 +41,7 @@ bool partIdle(int part);
 constexpr int kPatchBankSlots = 16;
 constexpr int kPatchBankParts = 3;
 // The slot 0 backup of an engine change is the 17th file of the part, "P-b" (patchSlotName(part, kBackupSlot)). It is not a slot: the
-// bank and the selector never see it, copyWorkspacePatches carries and prunes it like the slot files.
+// bank and the selector never see it, copyWorkspacePatches copies it like the slot files, and the project open prunes it in the Workspace.
 constexpr int kBackupSlot = kPatchBankSlots;
 // File name without folder and extension of slot `slot` of `part`: "P" for slot 0, "P-n" otherwise, "P-b" for kBackupSlot.
 void patchSlotName(int part, int slot, char (&out)[8]);
@@ -111,7 +111,6 @@ enum class SlotSelect
     kCopied,      // no file: the live patch stays and becomes the new slot (no file until it is saved)
     kOtherEngine, // a file of another engine sits there: nothing changed, the slot is not usable with this engine
     kError,       // the file could not be read: nothing changed
-    kUnavailable, // Synth::selectPatchSlot: the project has this slot but a failed project open did not copy it (BankMissing), nothing changed
     kSaveFailed,  // Synth::selectPatchSlot: the open slot is edited and its file could not be written: nothing changed, it stays open
 };
 // Main thread. Open slot `slot`. The caller saved the open slot first when it was dirty. Macros of the live patch come from

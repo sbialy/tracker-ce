@@ -4,7 +4,6 @@
 #include "mtSequencer.h"
 
 #include "fileManager.h"
-#include "Synth.h"
 
 #include <cstring>
 
@@ -14,12 +13,6 @@ bool cFileManager::createNewProjectInWorkspace()
 
     clearWorkspace();
     createWorkspaceDirs();
-#if defined(FEATURE_SYNTH_OPEN) && FILEMANAGER_HANDLE_SYNTH == 1
-    if (getSynth())
-    {
-        getSynth()->clearBankMarker(); // an empty Workspace is complete, nothing of a project folder is missing in it
-    }
-#endif
 
     report(" crating new project ");
 

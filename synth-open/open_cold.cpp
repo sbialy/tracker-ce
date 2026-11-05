@@ -7,7 +7,6 @@
 #include "open_patch.h"
 #include "open_load.h"
 #include "open_fileops.h"
-#include "open_bankcopy.h"
 
 #include "PolySynth/PatchStore.h"
 #include "PolySynth/sdk/InstrumentType.h"
@@ -921,25 +920,6 @@ class OpenPatchStore final : public PatchStore
         return true;
     }
 
-    // The file is gone, with a leftover <file>.bak (a reader would move it back) and <file>.tmp. True also when it was not there. False: the card
-    // failed or could not say, the file may still be there.
-    bool eraseRaw(const std::string& file)
-    {
-        if (!fs)
-        {
-            return false;
-        }
-        for (const std::string& path : { file + ".bak", file + ".tmp", file }) // the .bak first: a reader would bring it back
-        {
-            const Presence p = fs->presence(path);
-            if (p == Presence::kUnknown || (p == Presence::kPresent && !fs->remove(path)))
-            {
-                return false;
-            }
-        }
-        return true;
-    }
-
   private:
     // Opens a file for reading. No handle and openError false: the card says the file is not there (and no interrupted replace left its
     // old version at <file>.bak, which is moved back first). openError: it may be there and could not be opened, or the card failed.
@@ -1115,25 +1095,6 @@ bool patchNamesPersist(int part, PatchStore& workspace, SlotNames& names)
         }
     }
     return patchNamesWrite(part, workspace, names);
-}
-
-// ------------------------------------------------------------- bank copy marker (Workspace/bankcopy.missing, see open_bankcopy.h)
-
-Presence bankMarkerLoadRaw(PatchStore& workspace, uint8_t* buf, size_t cap, size_t& n)
-{
-    bool ioError = false;
-    n = static_cast<OpenPatchStore&>(workspace).readRaw(kBankMarkerFile, buf, cap, &ioError);
-    return ioError ? Presence::kUnknown : n > 0 ? Presence::kPresent : Presence::kAbsent;
-}
-
-bool bankMarkerStoreRaw(PatchStore& workspace, const uint8_t* data, size_t n)
-{
-    return static_cast<OpenPatchStore&>(workspace).writeRaw(kBankMarkerFile, data, n);
-}
-
-bool bankMarkerEraseRaw(PatchStore& workspace)
-{
-    return static_cast<OpenPatchStore&>(workspace).eraseRaw(kBankMarkerFile);
 }
 
 void patchBankSetLive(int part, Patch* patch)

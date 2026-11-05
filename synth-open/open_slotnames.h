@@ -2,7 +2,7 @@
 // Plain C++, header only, no PolySynth includes: the codec is tested on the host without the core.
 //
 // The .patch files carry no name, so the name a slot shows on the Synth screen is kept in a small text file next to the slot
-// files, in Workspace/ and in the project folder (copyWorkspacePatches carries and prunes it like a slot file):
+// files, in Workspace/ and in the project folder (copyWorkspacePatches copies it like a slot file, the project open prunes it in the Workspace):
 //
 //     tffnames 1\n
 //     b=<name>\n               the name of the slot 0 backup of an engine change (<P>-b.patch), when there is one

@@ -392,10 +392,6 @@ polysynth::open::SlotSelect Synth::selectPatchSlot(int part, int slot)
     {
         return SlotSelect::kSame;
     }
-    if (polysynth::open::slotUnavailable(bankMissing, part, slot))
-    {
-        return SlotSelect::kUnavailable; // the project has it, the failed open did not copy it: no empty slot, no copy of this sound, no file
-    }
 
     if (parts[part].patchDirty && !savePatchToWorkspace(part)) // a dirty slot is written when it is left
     {
@@ -741,61 +737,22 @@ struct BankCopyOps
 } // namespace
 #endif
 
-#ifdef FEATURE_SYNTH_OPEN
-namespace
-{
-// The card side of the bank copy marker (open_bankcopy.h) over the Workspace store
-struct BankMarkerIo
-{
-    polysynth::PatchStore& ws;
-
-    polysynth::open::Presence load(uint8_t* buf, size_t cap, size_t& n) { return polysynth::open::bankMarkerLoadRaw(ws, buf, cap, n); }
-    bool store(const uint8_t* data, size_t n) { return polysynth::open::bankMarkerStoreRaw(ws, data, n); }
-    bool erase() { return polysynth::open::bankMarkerEraseRaw(ws); }
-};
-} // namespace
-
-void Synth::beginBankCopy()
-{
-    BankMarkerIo io{ *patchStoreWorkspace };
-    polysynth::open::bankMarkerBegin(io, bankMissing);
-}
-
-void Synth::finishBankCopy()
-{
-    BankMarkerIo io{ *patchStoreWorkspace };
-    polysynth::open::bankMarkerFinish(io, bankMissing);
-}
-
-void Synth::loadBankMarker()
-{
-    BankMarkerIo io{ *patchStoreWorkspace };
-    polysynth::open::bankMarkerLoad(io, bankMissing);
-}
-
-void Synth::clearBankMarker()
-{
-    if (!patchStoreWorkspace)
-    {
-        bankMissing = {};
-        return;
-    }
-    BankMarkerIo io{ *patchStoreWorkspace };
-    polysynth::open::bankMarkerClear(io, bankMissing);
-}
-#endif
-
 bool Synth::copyWorkspacePatches(const char* sourceProjectPath, const char* destinationProjectPath, bool projectOpen)
 {
 #ifdef FEATURE_SYNTH_OPEN
     // The bank of each part: slot 0 is <P>.patch (all stock firmware knows), slot n > 0 is <P>-n.patch, then the slot 0 backup of an
-    // engine change (<P>-b.patch) and the slot names (<P>.names). A file the source has replaces the destination's whole or not at all,
-    // a file it does not have is removed from the destination (a slot never survives from another project) once every copy worked.
+    // engine change (<P>-b.patch) and the slot names (<P>.names). A file the source has replaces the destination's whole or not at all.
+    // Project open (project folder -> Workspace) then removes the Workspace slot files that the project does not have (a slot never survives
+    // from the previous project) once every copy worked. Project save (Workspace -> project folder) never removes anything in Projects.
     const std::string srcDir = sourceProjectPath;
     const std::string dstDir = destinationProjectPath;
     BankCopyOps ops{ filesystem };
-    // Open: records per file what could not be copied. Save: the recorded files of the project folder stay as they are (copyBank).
-    return polysynth::open::copyBank(ops, kSynthParts, srcDir, dstDir, projectOpen, bankMissing);
+    bool allCopied = true;
+    for (int part = 0; part < kSynthParts; part++)
+    {
+        allCopied = polysynth::open::copyPartBank(ops, part, srcDir, dstDir, projectOpen) && allCopied;
+    }
+    return allCopied;
 #else
     for (int part = 0; part < kSynthParts; part++)
     {

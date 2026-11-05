@@ -365,14 +365,10 @@ void ProjectOpen::openProjectFinish()
 #ifdef FEATURE_SYNTH_OPEN
     static_assert(FILEMANAGER_HANDLE_SYNTH == 1, "the open synth always has the bank copy");
     // As in stock the result of the bank copy never decides the load: the requested project is loaded with the patch files the
-    // Workspace has (open_bankcopy.h retries the copy once). The files that could not be copied are written to the marker in the Workspace
-    // (before the copy, and again after it) so that no later save, in this session or after a reboot, touches their originals in the
-    // project folder, and the slot selector refuses them. There is no popup for a failed copy: this runs in the file manager step and
-    // the load that follows owns the status. The audio engine restarts only at the end of that load.
+    // Workspace has (open_bankcopy.h retries the copy once). There is no popup for a failed copy: this runs in the file manager step
+    // and the load that follows owns the status. The audio engine restarts only at the end of that load.
     polysynth::open::openProjectAfterBankCopy(
-      []() { newFileManager.getSynth()->beginBankCopy(); },
       [&]() { return newFileManager.getSynth()->copyWorkspacePatches(srcFilePath, cWorkspacePath, true); },
-      []() { newFileManager.getSynth()->finishBankCopy(); },
       []()
       {
           newFileManager.setStatus(fmIdle);
