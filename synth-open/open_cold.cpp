@@ -536,6 +536,16 @@ void OpenPatch::importData(const PatchData& d)
 
 namespace
 {
+// Heap buffers of the file paths. On the MK66 operator new is a plain malloc (teensy_core/new.cpp) and returns null when the heap is
+// short, so std::make_unique would zero-fill from address 0 and fault. These return null instead and the callers give up cleanly.
+inline std::unique_ptr<uint8_t[]> tryBytes(size_t n)
+{
+    return std::unique_ptr<uint8_t[]>(new (std::nothrow) uint8_t[n]);
+}
+inline std::unique_ptr<PatchData> tryPatchData()
+{
+    return std::unique_ptr<PatchData>(new (std::nothrow) PatchData());
+}
 
 class OpenPatchStore final : public PatchStore
 {
@@ -602,9 +612,9 @@ class OpenPatchStore final : public PatchStore
         {
             return false;
         }
-        auto buf = std::make_unique<uint8_t[]>(kPatchFileMax + 1);
-        auto data = std::make_unique<PatchData>();
-        if (readPatchFile(def, op.typeId(), name, buf.get(), *data) != FileRead::kOk)
+        auto buf = tryBytes(kPatchFileMax + 1);
+        auto data = tryPatchData();
+        if (!buf || !data || readPatchFile(def, op.typeId(), name, buf.get(), *data) != FileRead::kOk)
         {
             return false;
         }
@@ -628,10 +638,14 @@ class OpenPatchStore final : public PatchStore
         {
             return false;
         }
-        auto data = std::make_unique<PatchData>();
-        op.exportData(*data);
+        auto data = tryPatchData();
         constexpr size_t kCap = 4096;
-        auto buf = std::make_unique<uint8_t[]>(kCap);
+        auto buf = tryBytes(kCap);
+        if (!data || !buf)
+        {
+            return false;
+        }
+        op.exportData(*data);
         const size_t n = encodePatch(*data, buf.get(), kCap);
         if (n == 0)
         {
@@ -672,10 +686,11 @@ class OpenPatchStore final : public PatchStore
         {
             return FileRead::kMissing;
         }
-        size_t n = 0, got;
+        size_t n = 0;
+        int32_t got; // a read error is -1: it ends the loop like the end of the file
         while (n <= kPatchFileMax && (got = fs->read(*h, std::span<uint8_t>(buf + n, kPatchFileMax + 1 - n))) > 0)
         {
-            n += got;
+            n += size_t(got);
         }
         fs->close(*h);
         return decodePatch(buf, n, out) && typeForEngineId(out.engine) == typeId ? FileRead::kOk : FileRead::kOther;
@@ -778,7 +793,11 @@ bool patchNamesRead(int part, PatchStore& workspace, SlotNames& out)
     }
     char base[8];
     patchSlotName(part, 0, base);
-    auto buf = std::make_unique<uint8_t[]>(kSlotNamesFileMax);
+    auto buf = tryBytes(kSlotNamesFileMax);
+    if (!buf)
+    {
+        return false;
+    }
     const size_t n = static_cast<OpenPatchStore&>(workspace).readRaw(std::string(base) + kSlotNamesExt, buf.get(), kSlotNamesFileMax);
     return n > 0 && decodeSlotNames(buf.get(), n, out);
 }
@@ -798,9 +817,13 @@ bool patchNamesWrite(int part, PatchStore& workspace, const SlotNames& in)
     {
         return true; // nothing to say and no file to correct: a project that never named a slot gets no side file
     }
-    uint8_t buf[kSlotNamesFileMax];
-    const size_t n = encodeSlotNames(in, buf, sizeof(buf));
-    return n > 0 && st.writeRaw(file, buf, n);
+    auto buf = tryBytes(kSlotNamesFileMax); // not on the stack: the audio interrupt runs on the same one
+    if (!buf)
+    {
+        return false;
+    }
+    const size_t n = encodeSlotNames(in, buf.get(), kSlotNamesFileMax);
+    return n > 0 && st.writeRaw(file, buf.get(), n);
 }
 
 void patchBankSetLive(int part, Patch* patch)
@@ -830,13 +853,13 @@ void patchBankPreload(int part, Patch& patch, PatchStore& workspace)
     }
     if (nb.vals)
     {
-        auto buf = std::make_unique<uint8_t[]>(kPatchFileMax + 1);
-        auto data = std::make_unique<PatchData>();
-        for (int i = 0; i < kPatchBankSlots; i++)
+        auto buf = tryBytes(kPatchFileMax + 1);
+        auto data = tryPatchData();
+        for (int i = 0; buf && data && i < kPatchBankSlots; i++) // no buffers: an empty bank, the FX does nothing
         {
             char name[8];
             patchSlotName(part, i, name);
-            *data = PatchData();
+            new (data.get()) PatchData(); // fresh in place: `*data = PatchData()` put a 1.6 KB temporary on the stack
             if (st.readPatchFile(def, nb.typeId, name, buf.get(), *data) == OpenPatchStore::FileRead::kOk)
             {
                 op.valuesFromData(*data, nb.vals + size_t(i) * size_t(n));
@@ -848,6 +871,19 @@ void patchBankPreload(int part, Patch& patch, PatchStore& workspace)
     std::swap(gBank[part], nb);
     OPEN_UNLOCK_AUDIO();
     delete[] nb.vals; // the previous bank
+}
+
+void patchBankToSlotZero(int part)
+{
+    if (!partOk(part))
+    {
+        return;
+    }
+    OPEN_LOCK_AUDIO();
+    gBank[part].cur = 0;
+    gBank[part].from = -1;
+    gBank[part].applied = false; // the project's own values are loaded next, the shadow row is stale
+    OPEN_UNLOCK_AUDIO();
 }
 
 int patchBankCurrent(int part)
@@ -920,8 +956,12 @@ SlotSelect patchBankSelect(int part, int slot, Patch& patch, PatchStore& workspa
     }
     char name[8];
     patchSlotName(part, slot, name);
-    auto buf = std::make_unique<uint8_t[]>(kPatchFileMax + 1);
-    auto data = std::make_unique<PatchData>();
+    auto buf = tryBytes(kPatchFileMax + 1);
+    auto data = tryPatchData();
+    if (!buf || !data)
+    {
+        return SlotSelect::kError;
+    }
     const auto state = st.readPatchFile(def, op.typeId(), name, buf.get(), *data);
     if (state == OpenPatchStore::FileRead::kOther)
     {
@@ -958,9 +998,9 @@ bool patchBankRevert(int part, Patch& patch, PatchStore& workspace)
     }
     char name[8];
     patchSlotName(part, b.from >= 0 ? b.from : b.cur, name);
-    auto buf = std::make_unique<uint8_t[]>(kPatchFileMax + 1);
-    auto data = std::make_unique<PatchData>();
-    if (st.readPatchFile(def, op.typeId(), name, buf.get(), *data) != OpenPatchStore::FileRead::kOk)
+    auto buf = tryBytes(kPatchFileMax + 1);
+    auto data = tryPatchData();
+    if (!buf || !data || st.readPatchFile(def, op.typeId(), name, buf.get(), *data) != OpenPatchStore::FileRead::kOk)
     {
         return false;
     }

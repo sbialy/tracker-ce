@@ -50,6 +50,9 @@ void patchBankSetLive(int part, Patch* patch);
 void patchBankPreload(int part, Patch& patch, PatchStore& workspace);
 // The open slot of the part in the editor (0 when the bank was never built)
 int patchBankCurrent(int part);
+// Main thread, project load before slot 0 is read: the editor goes back to slot 0 with no pending copy and no FX values, so a
+// fallback that saves the open slot (Init when <P>.patch is missing) writes <P>.patch and never a slot of the previous project.
+void patchBankToSlotZero(int part);
 // Main thread: the side file <P>.names (open_slotnames.h) of the part in `workspace`, the names of slots 1..15. Read: false and all
 // names empty when the file is missing or damaged. Write: a part with no name and no file writes nothing.
 static_assert(kSlotNameSlots == kPatchBankSlots, "one name per slot");

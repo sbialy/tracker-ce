@@ -221,6 +221,7 @@ void Synth::savePatchToWorkspace(int part)
 // Project load: slot 0 (<P>.patch) opens and the bank of the part is read from the Workspace slot files
 bool Synth::loadPatchFromWorkspace(int part, std::optional<std::string> overrideName)
 {
+    polysynth::open::patchBankToSlotZero(part); // an Init fallback must not land on a slot file of the previous project
     const bool fileLoaded = loadWorkspacePatch(part, std::move(overrideName));
     reloadPatchBank(part);
     loadSlotNames(part);
@@ -270,27 +271,35 @@ void Synth::reloadPatchBank(int part)
 // Project load: the names of slots 1..15 from Workspace/<P>.names, "Unnamed" (empty here) for any slot the file does not name
 void Synth::loadSlotNames(int part)
 {
-    polysynth::open::SlotNames names;
-    polysynth::open::patchNamesRead(part, *patchStoreWorkspace, names); // missing or damaged: all empty
+    std::unique_ptr<polysynth::open::SlotNames> names(new (std::nothrow) polysynth::open::SlotNames()); // 512 B, off the shared stack
+    if (!names)
+    {
+        return; // heap short: the slots show Unnamed
+    }
+    polysynth::open::patchNamesRead(part, *patchStoreWorkspace, *names); // missing or damaged: all empty
     for (int slot = 1; slot < kPatchSlots; slot++)
     {
-        parts[part].slotNames[slot] = names.name[slot];
+        parts[part].slotNames[slot] = names->name[slot];
     }
 }
 
 void Synth::persistSlotNames(int part)
 {
-    polysynth::open::SlotNames names;
+    std::unique_ptr<polysynth::open::SlotNames> names(new (std::nothrow) polysynth::open::SlotNames()); // 512 B, off the shared stack
+    if (!names)
+    {
+        return; // heap short: the file keeps the names it had
+    }
     const int cur = getPatchSlot(part);
     for (int slot = 1; slot < kPatchSlots; slot++)
     {
         const std::string& name = slot == cur ? parts[part].patchName : parts[part].slotNames[slot];
         if (name != "Unnamed")
         {
-            snprintf(names.name[slot], sizeof(names.name[slot]), "%s", name.c_str());
+            snprintf(names->name[slot], sizeof(names->name[slot]), "%s", name.c_str());
         }
     }
-    polysynth::open::patchNamesWrite(part, *patchStoreWorkspace, names);
+    polysynth::open::patchNamesWrite(part, *patchStoreWorkspace, *names);
 }
 
 bool Synth::applyPatchBankSlot(int part, int slot)

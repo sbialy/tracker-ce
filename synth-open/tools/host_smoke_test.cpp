@@ -61,8 +61,9 @@ struct MemFS : FileSystem {
     return std::vector<std::string_view>(listed.begin(), listed.end()); }
   std::optional<FileHandle> open(const std::string& path, OpenOptions o) override {
     const bool w = o == OpenOptions::kWrite; if (!w && !files.count(path)) return std::nullopt; if (w) files[path].clear();
-    hs.push_back(new H{path, 0, w}); return hs.back(); }
-  void close(FileHandle) override {}
+    hs.push_back(new H{path, 0, w}); openNow++; return hs.back(); }
+  int openNow = 0; // open handles (FatFs on the device has a fixed table, a leak ends in failed opens)
+  void close(FileHandle) override { openNow--; }
   bool write(FileHandle h, std::span<const uint8_t> d) override { auto* x = (H*)h; files[x->path].insert(files[x->path].end(), d.begin(), d.end()); return true; }
   int32_t read(FileHandle h, std::span<uint8_t> b) override { auto* x = (H*)h; auto& f = files[x->path]; size_t n = std::min(b.size(), f.size() - x->pos); std::copy_n(f.begin() + x->pos, n, b.begin()); x->pos += n; return (int32_t)n; }
   bool seek(FileHandle, int) override { return true; }
@@ -501,6 +502,62 @@ int main() {
       bool untouched = true; for (const auto& [k, v] : patchesBefore) untouched = untouched && mw->files.count(k) && mw->files[k] == v;
       check(io, "slot names: Workspace/<P>.names is written and read per part, a missing, empty or damaged file reads as no names, an unnamed part gets no file");
       check(untouched && mw->files.count("0.names") == 1, "slot names: the side file never touches a .patch file (stock files stay byte identical)");
+      mw->files.clear();
+    }
+    // ---- full project cycle, as on the device: 3 parts with every slot 0..15 saved and named (31 byte names), Workspace -> project
+    // folder (save) -> fresh Workspace (open), copied and pruned like Synth::copyWorkspacePatches, then the load path of
+    // WorkspaceProjectLoad (bank preload twice per part as setInstrumentType + loadPatchFromWorkspace, names read). Every open is closed.
+    {
+      mw->files.clear(); mw->openNow = 0;
+      const auto& k = kinds[0];
+      auto nameOf = [](int part, int slot) { char n[8]; open::patchSlotName(part, slot, n); return std::string(n); };
+      std::vector<std::unique_ptr<Patch>> slotPatch[open::kPatchBankParts];
+      for (int pt = 0; pt < open::kPatchBankParts; pt++) {
+        open::SlotNames nm;
+        for (int sl = 0; sl < open::kPatchBankSlots; sl++) {
+          auto p = ws->createPatch(int(k.id));
+          const auto& m = p->getMetadata();
+          for (size_t i = 0; i < m.params.size(); i++) { const float a = float(m.params[i].minValue), b = float(m.params[i].maxValue);
+            p->setParamValue(int(i), a + (b - a) * float((sl * 7 + pt * 3 + int(i)) % 16) / 15.0f, Patch::ParamChangeSource::kKnob); }
+          ws->savePatch(nameOf(pt, sl), *p); slotPatch[pt].push_back(std::move(p));
+          if (sl > 0) std::snprintf(nm.name[sl], sizeof(nm.name[sl]), "P%d slot %02d name 0123456789abcd", pt, sl); // 31 bytes
+        }
+        open::patchNamesWrite(pt, *ws, nm);
+      }
+      // save: Workspace -> project, open: project -> a Workspace that still holds another project's files (slot 15 and names pruned)
+      std::map<std::string, std::vector<uint8_t>> project = mw->files;
+      mw->files.clear(); mw->files["0-15.patch"] = {1, 2, 3}; mw->files["1.names"] = {'x'};
+      auto copyPart = [&](int pt) {
+        for (int sl = 0; sl < open::kPatchBankSlots; sl++) { const std::string f = nameOf(pt, sl) + ".patch";
+          if (project.count(f)) mw->files[f] = project[f]; else if (sl > 0) mw->files.erase(f); }
+        const std::string nf = nameOf(pt, 0) + open::kSlotNamesExt;
+        if (project.count(nf)) mw->files[nf] = project[nf]; else mw->files.erase(nf); };
+      for (int pt = 0; pt < open::kPatchBankParts; pt++) copyPart(pt);
+      bool cyc = mw->files == project;
+      std::unique_ptr<Patch> live[open::kPatchBankParts];
+      for (int pt = 0; pt < open::kPatchBankParts; pt++) {
+        live[pt] = ws->createPatch(int(k.id));
+        open::patchBankSetLive(pt, live[pt].get());
+        open::patchBankPreload(pt, *live[pt], *ws);                       // Synth::setInstrumentType
+        cyc = cyc && ws->loadPatch(nameOf(pt, 0), *live[pt], true);       // Synth::loadWorkspacePatch
+        open::patchBankPreload(pt, *live[pt], *ws);                       // Synth::reloadPatchBank
+        open::SlotNames back; cyc = cyc && open::patchNamesRead(pt, *ws, back);
+        for (int sl = 1; sl < open::kPatchBankSlots; sl++) { char want[40]; std::snprintf(want, sizeof(want), "P%d slot %02d name 0123456789abcd", pt, sl);
+          cyc = cyc && std::strcmp(back.name[sl], want) == 0; }
+        for (int sl = 15; sl >= 0; sl--) {
+          cyc = cyc && open::patchBankApply(pt, sl);
+          const auto& m = live[pt]->getMetadata();
+          for (size_t i = 0; i < m.params.size() && cyc; i++) cyc = *live[pt]->getParamValue(int(i)) == *slotPatch[pt][sl]->getParamValue(int(i));
+        }
+        cyc = cyc && open::patchBankCurrent(pt) == 0;
+      }
+      check(cyc, "project cycle: 3 parts x 16 named slots save, copy and prune into a used Workspace, load, preload twice, every slot and name comes back");
+      check(mw->openNow == 0, "project cycle: every file opened on the load and save path is closed again");
+      bool zero = open::patchBankSelect(0, 5, *live[0], *ws) == open::SlotSelect::kLoaded && open::patchBankCurrent(0) == 5 && open::patchBankApply(0, 9);
+      open::patchBankToSlotZero(0);   // Synth::loadPatchFromWorkspace, before slot 0 is read
+      zero = zero && open::patchBankCurrent(0) == 0 && open::patchBankSelect(0, 0, *live[0], *ws) == open::SlotSelect::kSame;
+      check(zero, "project load: the editor is back on slot 0 before slot 0 is read, a fallback save never writes a slot of the old project");
+      for (int pt = 0; pt < open::kPatchBankParts; pt++) open::patchBankSetLive(pt, nullptr);
       mw->files.clear();
     }
 #ifdef OT_ORACLE
