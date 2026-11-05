@@ -119,7 +119,16 @@ void WorkspaceProjectSave::saveProjectToWorkspaceInit()
 void WorkspaceProjectSave::saveProjectToWorkspaceFinish()
 {
 #if FILEMANAGER_HANDLE_SYNTH == 1
+#ifdef FEATURE_SYNTH_OPEN
+    if (!newFileManager.getSynth()->saveDirtyWorkspacePatches())
+    {
+        mtProject.values.projectNotSavedFlag |= 1; // the Workspace lacks the edited patch: the Projects copy must not count as saved
+        stopOperationWithError(fmSaveError);
+        return;
+    }
+#else
     newFileManager.getSynth()->saveDirtyWorkspacePatches();
+#endif
 #endif
 
     if (newFileManager.getStatus() == fmSavingProjectToProjects) // przejdz do kopiowania projektu

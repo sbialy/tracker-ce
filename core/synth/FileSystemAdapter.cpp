@@ -6,6 +6,7 @@
 #include "cr_section_macros.h"
 #include <algorithm>
 #include <cassert>
+#include <cstdio>
 #include <cstring>
 
 namespace FileSystemAdapterBuffers
@@ -97,6 +98,53 @@ bool FileSystemAdapter::seek(FileHandle file, int offset)
 void FileSystemAdapter::createFolder(const std::string& path)
 {
     platformFileSystem->mkdir(0, (pathPrefix + path).c_str());
+}
+
+bool FileSystemAdapter::replace(const std::string& from, const std::string& to)
+{
+    return replaceFile(platformFileSystem, (pathPrefix + from).c_str(), (pathPrefix + to).c_str());
+}
+
+bool FileSystemAdapter::remove(const std::string& path)
+{
+    return platformFileSystem->remove((pathPrefix + path).c_str());
+}
+
+bool FileSystemAdapter::replaceFile(::FileSystem* fileSystem, const char* from, const char* to)
+{
+    // FatFs does not rename over a file: the old one steps aside as <to>.bak and goes back if the new one cannot take its place.
+    // A stale .bak (power loss in between) is the old file, it is replaced here.
+    constexpr size_t kPathMax = 128;
+    char bak[kPathMax];
+    if (snprintf(bak, sizeof(bak), "%s.bak", to) >= static_cast<int>(sizeof(bak)))
+    {
+        return false;
+    }
+    const bool hadOld = fileSystem->exists(to);
+    if (hadOld)
+    {
+        if (fileSystem->exists(bak) && !fileSystem->remove(bak))
+        {
+            return false;
+        }
+        if (!fileSystem->rename(to, bak))
+        {
+            return false;
+        }
+    }
+    if (!fileSystem->rename(from, to))
+    {
+        if (hadOld)
+        {
+            fileSystem->rename(bak, to);
+        }
+        return false;
+    }
+    if (hadOld)
+    {
+        fileSystem->remove(bak);
+    }
+    return true;
 }
 #endif
 // NOLINTEND

@@ -199,19 +199,31 @@ void Synth::initPatch(int part)
     ENABLE_AUDIO_INTERRUPTS();
 
     setPatch(part, std::move(newPatch), kInitPatchName);
+#ifdef FEATURE_SYNTH_OPEN
+    if (!savePatchToWorkspace(part))
+    {
+        parts[part].patchDirty = true; // the Init patch is not in its file yet: the next save writes it
+    }
+#else
     savePatchToWorkspace(part);
+#endif
 }
 
-void Synth::savePatchToWorkspace(int part)
+bool Synth::savePatchToWorkspace(int part)
 {
 #ifdef FEATURE_SYNTH_OPEN
     // The open slot's file: <P>.patch for slot 0, <P>-n.patch otherwise. A slot the Patch FX replaced goes back and the patch is copied
-    // out in one audio-free window, the file is written from that copy.
-    polysynth::open::patchSaveOpenSlot(part, *parts[part].patch, *patchStoreWorkspace);
+    // out in one audio-free window, the file is written from that copy (old file kept until the new one is complete), and the dirty flag
+    // stays when it was not written: the edits are in memory only.
+    if (!polysynth::open::patchSaveOpenSlot(part, *parts[part].patch, *patchStoreWorkspace))
+    {
+        return false;
+    }
 #else
     patchStoreWorkspace->savePatch(fmt::format("{}", part), *parts[part].patch);
 #endif
     parts[part].patchDirty = false;
+    return true;
 }
 
 #ifdef FEATURE_SYNTH_OPEN
@@ -311,17 +323,18 @@ void Synth::persistSlotNames(int part)
     polysynth::open::patchNamesWrite(part, *patchStoreWorkspace, *names);
 }
 
-void Synth::backupSlotZero(int part, const char* slotZeroName)
+bool Synth::backupSlotZero(int part, const char* slotZeroName)
 {
-    if (parts[part].patchDirty)
+    if (parts[part].patchDirty && !savePatchToWorkspace(part))
     {
-        savePatchToWorkspace(part); // the edits of the open slot are in its file before slot 0's file is copied
+        return false; // the edits of the open slot are in its file before slot 0's file is copied, else the engine does not change
     }
     if (polysynth::open::patchBackupSave(part, *parts[part].patch, *patchStoreWorkspace) == polysynth::open::Backup::kSaved)
     {
         parts[part].backupName = slotZeroName;
         persistSlotNames(part);
     }
+    return true;
 }
 
 bool Synth::restoreSlotZeroBackup(int part)
@@ -356,9 +369,9 @@ polysynth::open::SlotSelect Synth::selectPatchSlot(int part, int slot)
         return SlotSelect::kSame;
     }
 
-    if (parts[part].patchDirty)
+    if (parts[part].patchDirty && !savePatchToWorkspace(part)) // a dirty slot is written when it is left
     {
-        savePatchToWorkspace(part); // a dirty slot is written when it is left
+        return SlotSelect::kSaveFailed; // the edits exist only here: the slot stays open and edited
     }
 
     const SlotSelect result = polysynth::open::patchBankSelect(part, slot, *parts[part].patch, *patchStoreWorkspace);
@@ -381,12 +394,9 @@ polysynth::open::SlotSelect Synth::selectPatchSlot(int part, int slot)
     return result;
 }
 
-void Synth::flushPatchSlot(int part)
+bool Synth::flushPatchSlot(int part)
 {
-    if (parts[part].patchDirty && getPatchSlot(part) > 0)
-    {
-        savePatchToWorkspace(part);
-    }
+    return !(parts[part].patchDirty && getPatchSlot(part) > 0) || savePatchToWorkspace(part);
 }
 
 void Synth::revertCurrentPatch(int part, const std::string& previousName)
@@ -404,18 +414,20 @@ void Synth::revertCurrentPatch(int part, const std::string& previousName)
 }
 #endif
 
-void Synth::saveDirtyWorkspacePatches()
+bool Synth::saveDirtyWorkspacePatches()
 {
+    bool allSaved = true;
     for (int part = 0; part < kSynthParts; part++)
     {
-        if (parts[part].patchDirty)
+        if (parts[part].patchDirty && !savePatchToWorkspace(part))
         {
-            savePatchToWorkspace(part);
+            allSaved = false; // still dirty, the next save tries again
         }
 #ifdef FEATURE_SYNTH_OPEN
         persistSlotNames(part); // project save: the names go to the Workspace before it is copied to the project
 #endif
     }
+    return allSaved;
 }
 
 void Synth::setVoiceCount(int part, int voiceCount)

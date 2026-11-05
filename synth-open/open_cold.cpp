@@ -734,7 +734,8 @@ class OpenPatchStore final : public PatchStore
         return saveSnapshot(static_cast<const OpenPatch&>(patch), name, -1);
     }
     // Writes the patch as file `name`. The values and macros are exported in one audio-free window, with the values an FX replaced put
-    // back first, so the file is one patch whatever the FX does while it is encoded and written. `part` >= 0: the file is the open slot of that part and its row of the Patch FX bank becomes the values that were saved.
+    // back first, so the file is one patch whatever the FX does while it is encoded and written. The old file stays until the new one is
+    // complete. `part` >= 0: the file is the open slot of that part and its row of the Patch FX bank becomes the values that were saved.
     bool saveSnapshot(const OpenPatch& op, const std::string& name, int part)
     {
         const EngineDef* def = op.getDef();
@@ -819,16 +820,33 @@ class OpenPatchStore final : public PatchStore
         fs->close(*h);
         return n;
     }
+    // The file `file` becomes exactly these bytes, or stays as it was: they go to <file>.tmp first and replace the old file only when
+    // all of them are written (an SD error, a full card or a power loss never leaves half a project file).
     bool writeRaw(const std::string& file, const uint8_t* data, size_t n)
     {
-        auto h = fs ? fs->open(file, FileSystem::OpenOptions::kWrite) : std::nullopt;
+        if (!fs)
+        {
+            return false;
+        }
+        const std::string tmp = file + ".tmp";
+        auto h = fs->open(tmp, FileSystem::OpenOptions::kWrite);
         if (!h)
         {
             return false;
         }
         const bool ok = fs->write(*h, std::span<const uint8_t>(data, n));
         fs->close(*h);
-        return ok;
+        if (!ok)
+        {
+            fs->remove(tmp);
+            return false;
+        }
+        if (!fs->replace(tmp, file))
+        {
+            fs->remove(tmp);
+            return false;
+        }
+        return true;
     }
 
   private:

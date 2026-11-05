@@ -21,6 +21,12 @@ class FileSystemAdapter : public polysynth::FileSystem
     bool seek(FileHandle file, int offset) override;
 
     void createFolder(const std::string& path) override;
+    bool replace(const std::string& from, const std::string& to) override;
+    bool remove(const std::string& path) override;
+
+    // `to` becomes the file `from`, both full paths. `to` keeps its old content unless the replacement is complete: it is moved
+    // aside first and moved back when the rename of `from` fails. False: `to` is as it was.
+    static bool replaceFile(::FileSystem* fileSystem, const char* from, const char* to);
 
     static void staticInit();
 

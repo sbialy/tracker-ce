@@ -101,8 +101,9 @@ class Synth
     bool savePatch(int part);
     void initPatch(int part);
     bool loadPatchFromWorkspace(int part, std::optional<std::string> overrideName = std::nullopt);
-    void savePatchToWorkspace(int part);
-    void saveDirtyWorkspacePatches();
+    // False: the patch could not be written, the part stays dirty. The caller reports it and does not go on with what needed the file.
+    bool savePatchToWorkspace(int part);
+    bool saveDirtyWorkspacePatches();
     void copyWorkspacePatches(const char* sourceProjectPath, const char* destinationProjectPath);
     void setPatchDirty(int part) { parts[part].patchDirty = true; };
     bool isAnyPatchDirty();
@@ -118,20 +119,22 @@ class Synth
     // Everything here is main thread only except applyPatchBankSlot (audio callback, copies floats, no shared_ptr).
     static constexpr int kPatchSlots = polysynth::open::kPatchBankSlots;
     int getPatchSlot(int part);
-    // Saves the open slot when it is dirty, then opens `slot` (a slot without a file starts as a copy of the open one)
+    // Saves the open slot when it is dirty, then opens `slot` (a slot without a file starts as a copy of the open one). kSaveFailed: the
+    // open slot could not be saved, nothing changed.
     polysynth::open::SlotSelect selectPatchSlot(int part, int slot);
     // Cancel of the library browser: back to what the open slot was before the browsing
     void revertCurrentPatch(int part, const std::string& previousName);
     // If the Patch FX left another slot's values in the part, put the open slot's values back (call before showing or editing)
     void restorePatchFx(int part) { polysynth::open::patchBankRestore(part); }
-    // Writes the open slot to its Workspace file when it was edited (before the engine of the part changes)
-    void flushPatchSlot(int part);
+    // Writes the open slot to its Workspace file when it was edited (before the engine of the part changes). False: it could not be written.
+    bool flushPatchSlot(int part);
     // keepNames: an engine change, the slot files (and so the names) of the old engine stay, only slot 0's name goes
     void reloadPatchBank(int part, bool keepNames = false);
     // Engine change: before setInstrumentType, keeps the slot 0 file as <P>-b.patch (see patchBackupSave). `slotZeroName` is the name the
     // project stores for slot 0. After setInstrumentType, restoreSlotZeroBackup puts the backup back as slot 0 when it is a patch of the
-    // new engine (true, patch and name are the backup's), else false and the caller loads Init.
-    void backupSlotZero(int part, const char* slotZeroName);
+    // new engine (true, patch and name are the backup's), else false and the caller loads Init. backupSlotZero is false when the edits of
+    // the open slot could not be written: the engine must not change then.
+    bool backupSlotZero(int part, const char* slotZeroName);
     bool restoreSlotZeroBackup(int part);
     bool applyPatchBankSlot(int part, int slot);
     // Names of slots 1..15 live in the side file <P>.names next to the slot files (see synth-open/open_slotnames.h). Written whenever

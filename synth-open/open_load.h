@@ -81,7 +81,7 @@ bool patchBackupRestore(int part, Patch& live, PatchStore& workspace);
 void patchBankRestore(int part);
 // Main thread: writes the live patch of the part as the file of its open slot in `workspace` (<P>.patch for slot 0, <P>-n.patch
 // otherwise). The values the FX replaced go back and the patch is copied out in one audio-free window, so the file is the open slot
-// whatever the FX does meanwhile. On success the bank row of the slot is the values
+// whatever the FX does meanwhile. The old file stays until the new one is complete. On success the bank row of the slot is the values
 // that were written. False: nothing was written, the file and the bank are as they were.
 bool patchSaveOpenSlot(int part, Patch& live, PatchStore& workspace);
 
@@ -92,6 +92,7 @@ enum class SlotSelect
     kCopied,      // no file: the live patch stays and becomes the new slot (no file until it is saved)
     kOtherEngine, // a file of another engine sits there: nothing changed, the slot is not usable with this engine
     kError,
+    kSaveFailed,  // Synth::selectPatchSlot: the open slot is edited and its file could not be written: nothing changed, it stays open
 };
 // Main thread. Open slot `slot`. The caller saved the open slot first when it was dirty. Macros of the live patch come from
 // the file (kLoaded) or stay (kCopied). The file's values, the current slot and the FX shadow change in one audio-free window.

@@ -41,6 +41,23 @@ class FileSystem
 
     virtual void createFolder(const std::string& path) = 0;
 
+    /**
+     * Replaces the file `to` by the file `from` (same folder). The file `to` is never lost: if this returns false it is as it was
+     * (`from` may be left behind). The default does nothing and fails.
+     */
+    virtual bool replace(const std::string& from, const std::string& to)
+    {
+        (void)from;
+        (void)to;
+        return false;
+    }
+    /** Deletes a file. False when it is not there or cannot be deleted. The default does nothing and fails. */
+    virtual bool remove(const std::string& path)
+    {
+        (void)path;
+        return false;
+    }
+
     virtual ~FileSystem() = default;
 };
 }

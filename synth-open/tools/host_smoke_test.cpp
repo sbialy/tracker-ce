@@ -63,22 +63,27 @@ struct MemFS : FileSystem {
     return std::vector<std::string_view>(listed.begin(), listed.end()); }
   std::optional<FileHandle> open(const std::string& path, OpenOptions o) override {
     const bool w = o == OpenOptions::kWrite; if (!w && onRead) onRead(path);   // the audio callback runs while the card is read
-    if (!w && !files.count(path)) return std::nullopt; 
+    if (!w && !files.count(path)) return std::nullopt; if (w && failOpenWrite) return std::nullopt;
     if (w) files[path].clear();
     hs.push_back(new H{path, 0, w}); openNow++; return hs.back(); }
   int openNow = 0; // open handles (FatFs on the device has a fixed table, a leak ends in failed opens)
   void close(FileHandle) override { openNow--; }
   bool write(FileHandle h, std::span<const uint8_t> d) override {
     auto* x = (H*)h; if (onWrite) onWrite(x->path);                  // the audio callback runs while the card is written
+    if (failWrite) { files[x->path].insert(files[x->path].end(), d.begin(), d.begin() + d.size() / 2); return false; }   // a full card: half of it
     files[x->path].insert(files[x->path].end(), d.begin(), d.end()); return true; }
   int32_t read(FileHandle h, std::span<uint8_t> b) override { auto* x = (H*)h; auto& f = files[x->path];
     size_t n = std::min(b.size(), f.size() - x->pos);
     std::copy_n(f.begin() + x->pos, n, b.begin()); x->pos += n; return (int32_t)n; }
   bool seek(FileHandle, int) override { return true; }
   void createFolder(const std::string&) override {}
-  // hooks of the save and load tests
+  bool replace(const std::string& from, const std::string& to) override {
+    if (failReplace || !files.count(from)) return false; files[to] = std::move(files[from]); files.erase(from); return true; }
+  bool remove(const std::string& path) override { return files.erase(path) > 0; }
+  // failure injection and hooks of the save, load and copy tests
+  bool failOpenWrite = false, failWrite = false, failReplace = false;
   std::function<void(const std::string&)> onRead, onWrite;
-  void healthy() { onRead = nullptr; onWrite = nullptr; }
+  void healthy() { failOpenWrite = failWrite = failReplace = false; onRead = nullptr; onWrite = nullptr; }
 };
 // A short heap, as on the device after a while: nothrow new (what the patch store and bank use) fails above gShortHeap bytes (0: off)
 static size_t gShortHeap = 0;
@@ -948,6 +953,35 @@ int main() {
         live = setup(); open::patchBankApply(0, 1);
         ok = ok && ws->loadPatch("0-3", *live, true); open::patchBankRestore(0); ok = ok && raw(*live) == hiV;   // a library load replaces the shadow too
         check(ok, "B3: a slot loaded or copied while the FX runs, and a library load, are not undone by the next restore");
+      }
+      // B4: a failed save is reported, the old file stays, nothing is published to the bank, and a slot switch is refused
+      {
+        auto live = setup();
+        live->setParamValue(0, edit0, Patch::ParamChangeSource::kKnob);
+        const auto before = mw->files["0.patch"];
+        bool ok = true;
+        for (int mode = 0; mode < 3; mode++) {
+          mw->healthy(); mw->failWrite = mode == 0; mw->failOpenWrite = mode == 1; mw->failReplace = mode == 2;
+          ok = ok && !open::patchSaveOpenSlot(0, *live, *ws) && mw->files["0.patch"] == before;
+          for (const auto& kv : mw->files) ok = ok && kv.first.find(".tmp") == std::string::npos;   // no half file left behind
+        }
+        mw->healthy();
+        ok = ok && open::patchBankSelect(0, 1, *live, *ws) == open::SlotSelect::kLoaded && open::patchBankApply(0, 0) && raw(*live) == baseV;   // the bank row is the old file's
+        check(ok, "B4: a save that fails (card full, open or rename fails) keeps the old file and the old bank row");
+        live = setup(); live->setParamValue(0, edit0, Patch::ParamChangeSource::kKnob);
+        bool dirty = true;
+        auto saveOpen = [&]() { if (!open::patchSaveOpenSlot(0, *live, *ws)) return false; dirty = false; return true; };       // Synth::savePatchToWorkspace
+        auto selectSlot = [&](int slot) { if (dirty && !saveOpen()) return open::SlotSelect::kSaveFailed;                      // Synth::selectPatchSlot
+                                          return open::patchBankSelect(0, slot, *live, *ws); };
+        mw->failWrite = true;
+        ok = selectSlot(1) == open::SlotSelect::kSaveFailed && dirty && open::patchBankCurrent(0) == 0 && raw(*live) == editedV && mw->files["0.patch"] == before;
+        mw->healthy();
+        ok = ok && selectSlot(1) == open::SlotSelect::kLoaded && !dirty && fileValues("0") == editedV;        // the retry saved the edits, then switched
+        check(ok, "B4: with the card failing the edited slot stays open and dirty, after the failure clears the switch saves it first");
+        const auto keep = mw->files["0-1.patch"]; mw->failWrite = true;
+        ok = !ws->savePatch("0-1", *base) && mw->files["0-1.patch"] == keep && !ws->savePatch("newname", *base) && !mw->files.count("newname.patch");
+        mw->healthy();
+        check(ok, "B4: a library or Workspace save that fails keeps the old file and makes no new one");
       }
       check(mw->openNow == 0, "review blockers: every file opened is closed again");
       open::patchBankSetLive(0, nullptr);

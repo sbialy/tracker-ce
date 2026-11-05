@@ -342,7 +342,10 @@ static void functSynthConfirmLoad()
     IE->getSynth()->initSynthPartMacrosValues(syntPartIdx, mtProject.values.synthPart[syntPartIdx]);
     engine.refreshSynthInstrumentParams(mtProject.values.synthPart[syntPartIdx], syntPartIdx);
 
-    IE->getSynth()->savePatchToWorkspace(syntPartIdx);
+    if (!IE->getSynth()->savePatchToWorkspace(syntPartIdx))
+    {
+        mtPopups.show(0, "Error saving patch"); // the patch stays dirty, a later save writes it
+    }
 
     newFileManager.setProjectStructChanged();
 
@@ -467,8 +470,15 @@ void cInstrumentEditor::changeSynthModel(int16_t value)
     // An engine change keeps the slot files of the old engine (see Synth::setInstrumentType): an edited slot 1..15 is
     // written before the engine goes. Slot 0 is replaced by the new Init patch as it always was, but its file is kept first as
     // the one backup of the part (<P>-b.patch), and it comes back as slot 0 when the part returns to an engine the backup is of.
-    synth->flushPatchSlot(syntPartIdx);
-    synth->backupSlotZero(syntPartIdx, mtProject.values.synthPart[syntPartIdx].patchName);
+    // If the edits cannot be written the engine stays: they would be lost with the patch.
+    if (!synth->flushPatchSlot(syntPartIdx) ||
+        !synth->backupSlotZero(syntPartIdx, mtProject.values.synthPart[syntPartIdx].patchName))
+    {
+        mtProject.values.synthPart[syntPartIdx].synthType = previousSynthType;
+        showSynthModel(syntPartIdx);
+        mtPopups.show(0, "Error saving patch");
+        return;
+    }
 #endif
     synth->setInstrumentType(syntPartIdx, Synth::kSynthTypes.at(newUi));
 
@@ -521,6 +531,11 @@ void cInstrumentEditor::changeSynthSlot(int16_t value)
     if (result == SlotSelect::kError)
     {
         mtPopups.show(0, "Error loading slot");
+        return;
+    }
+    if (result == SlotSelect::kSaveFailed)
+    {
+        mtPopups.show(0, "Error saving patch"); // the edited slot stays open
         return;
     }
     if (result == SlotSelect::kSame)
