@@ -301,6 +301,14 @@ namespace open
 
 // ------------------------------------------------------------------- patch
 
+// The Patch FX bank (end of this file) and the live patch of a part. The values the editor works on are the ones in the patch, or in the
+// shadow row of the bank while the FX has replaced them. Audio interrupts are disabled by the caller where it is said so.
+float patchBankEditedValue(const OpenPatch* p, const float* live, int id); // any thread state of the FX, no lock
+void patchBankBeforeEdit(const OpenPatch* p);                              // locked: the shadow goes back before a value is written
+void patchBankExportLocked(const OpenPatch& p, PatchData& out);            // locked: the shadow goes back, then p is exported
+void patchBankValuesReplaced(const OpenPatch& p);                          // locked: an import replaced the values, no shadow is left
+void patchBankPublish(int part, const OpenPatch& p, const PatchData& saved); // takes the lock: the row of the open slot is what was saved
+
 // The pool of OpenPatch objects (3,036 B each on the MK66), in the SDRAM. A part holds one live patch, a new one is made before the old is
 // freed (engine change, init) and the Synth keeps a few spare references, so 5 is enough. Main thread only, like every create and free of a
 // patch. A full pool falls back to the heap, as before.
@@ -365,7 +373,7 @@ OpenPatch::OpenPatch(int typeId, const InstrumentType* type)
 
 Patch::optional_paramvalue_t OpenPatch::getParamValue(int id) const
 {
-    return inRange(id) ? optional_paramvalue_t{ values[id] } : optional_paramvalue_t{ std::nullopt };
+    return inRange(id) ? optional_paramvalue_t{ patchBankEditedValue(this, values, id) } : optional_paramvalue_t{ std::nullopt };
 }
 
 tiny_optional<float> OpenPatch::getParamValueEditMapped(int id) const
@@ -374,7 +382,7 @@ tiny_optional<float> OpenPatch::getParamValueEditMapped(int id) const
     {
         return std::nullopt;
     }
-    return valueToCurve(def->params[id], values[id]);
+    return valueToCurve(def->params[id], patchBankEditedValue(this, values, id));
 }
 
 void OpenPatch::setParamValueEditMapped(int id, tiny_optional<float> v, ParamChangeSource src)
@@ -404,6 +412,7 @@ void OpenPatch::setParamValue(int id, optional_paramvalue_t value, ParamChangeSo
     }
     const auto& p = metadata.params[id];
     const float v = value.has_value() ? *value : p.defaultValue.value_or(0.0f);
+    patchBankBeforeEdit(this); // the caller holds the audio lock: the edit lands on the edited values, never on the ones of an FX slot
     values[id] = std::clamp(v, float(p.minValue), float(p.maxValue));
 }
 
@@ -710,17 +719,24 @@ class OpenPatchStore final : public PatchStore
         {
             OPEN_LOCK_AUDIO();
             op.importData(sc.data());
+            patchBankValuesReplaced(op); // what the FX had set aside belonged to the patch that was here
             OPEN_UNLOCK_AUDIO();
         }
         else
         {
             op.importData(sc.data());
+            patchBankValuesReplaced(op);
         }
         return true;
     }
     bool savePatch(const std::string& name, const Patch& patch) override
     {
-        const OpenPatch& op = static_cast<const OpenPatch&>(patch);
+        return saveSnapshot(static_cast<const OpenPatch&>(patch), name, -1);
+    }
+    // Writes the patch as file `name`. The values and macros are exported in one audio-free window, with the values an FX replaced put
+    // back first, so the file is one patch whatever the FX does while it is encoded and written. `part` >= 0: the file is the open slot of that part and its row of the Patch FX bank becomes the values that were saved.
+    bool saveSnapshot(const OpenPatch& op, const std::string& name, int part)
+    {
         const EngineDef* def = op.getDef();
         if (!fs || !def)
         {
@@ -733,7 +749,9 @@ class OpenPatchStore final : public PatchStore
         {
             return false;
         }
-        op.exportData(sc.data());
+        OPEN_LOCK_AUDIO();
+        patchBankExportLocked(op, sc.data());
+        OPEN_UNLOCK_AUDIO();
         const size_t n = encodePatch(sc.data(), sc.buf(), kCap);
         if (n == 0)
         {
@@ -743,14 +761,15 @@ class OpenPatchStore final : public PatchStore
         {
             fs->createFolder(def->name);
         }
-        auto h = fs->open(pathFor(def, name), FileSystem::OpenOptions::kWrite);
-        if (!h)
+        if (!writeRaw(pathFor(def, name), sc.buf(), n))
         {
             return false;
         }
-        const bool ok = fs->write(*h, std::span<const uint8_t>(sc.buf(), n));
-        fs->close(*h);
-        return ok;
+        if (part >= 0)
+        {
+            patchBankPublish(part, op, sc.data());
+        }
+        return true;
     }
     std::optional<InstrumentTypeId> loadPatchInstrumentType(const std::string&) override
     {
@@ -926,7 +945,12 @@ void patchBankSetLive(int part, Patch* patch)
 {
     if (partOk(part))
     {
-        gLive[part] = static_cast<OpenPatch*>(patch);
+        OpenPatch* const live = static_cast<OpenPatch*>(patch);
+        if (gLive[part] != live)
+        {
+            gBank[part].applied = false; // the values the FX set aside belong to the patch that goes
+        }
+        gLive[part] = live;
     }
 }
 
@@ -997,6 +1021,43 @@ inline bool bankMatches(const PartBank& b, const OpenPatch* p)
 }
 } // namespace
 
+namespace
+{
+// The FX replaced the live values of the part: the edited ones (the shadow row) go back. Audio interrupts disabled by the caller.
+void bankRestoreLocked(PartBank& b, OpenPatch* p)
+{
+    if (b.applied && bankMatches(b, p))
+    {
+        p->setValuesRaw(b.vals + size_t(kPatchBankSlots) * size_t(b.nParams));
+    }
+    b.applied = false;
+}
+
+// The part whose live patch is `p`, -1 for any other patch
+int liveOwner(const OpenPatch* p)
+{
+    for (int part = 0; part < kPatchBankParts; part++)
+    {
+        if (gLive[part] == p)
+        {
+            return part;
+        }
+    }
+    return -1;
+}
+
+// The row of the open slot is what was written to its file (the values as loading that file gives them). Audio interrupts disabled.
+void bankPublishLocked(PartBank& b, const OpenPatch& p, const PatchData& saved)
+{
+    if (bankMatches(b, &p))
+    {
+        p.valuesFromData(saved, b.vals + size_t(b.cur) * size_t(b.nParams));
+        b.valid |= uint16_t(1u << b.cur);
+        b.from = -1;
+    }
+}
+} // namespace
+
 void patchBankRestore(int part)
 {
     if (!partOk(part))
@@ -1004,32 +1065,78 @@ void patchBankRestore(int part)
         return;
     }
     OPEN_LOCK_AUDIO();
-    PartBank& b = gBank[part];
-    OpenPatch* p = gLive[part];
-    if (b.applied && bankMatches(b, p))
-    {
-        p->setValuesRaw(b.vals + size_t(kPatchBankSlots) * size_t(b.nParams));
-    }
-    b.applied = false;
+    bankRestoreLocked(gBank[part], gLive[part]);
     OPEN_UNLOCK_AUDIO();
 }
 
-void patchBankCommit(int part)
+void patchBankBeforeEdit(const OpenPatch* p)
+{
+    const int part = liveOwner(p);
+    if (part >= 0)
+    {
+        bankRestoreLocked(gBank[part], gLive[part]);
+    }
+}
+
+float patchBankEditedValue(const OpenPatch* p, const float* live, int id)
+{
+    const int part = liveOwner(p);
+    if (part < 0)
+    {
+        return live[id];
+    }
+    const PartBank& b = gBank[part];
+    const volatile bool& applied = b.applied; // the audio callback flips it
+    for (;;)
+    {
+        const bool was = applied;
+        const float v = was && bankMatches(b, p) ? b.vals[size_t(kPatchBankSlots) * size_t(b.nParams) + size_t(id)] : live[id];
+        if (applied == was) // one callback runs to its end between two reads, it cannot flip the flag twice unseen
+        {
+            return v;
+        }
+    }
+}
+
+void patchBankExportLocked(const OpenPatch& p, PatchData& out)
+{
+    const int part = liveOwner(&p);
+    if (part >= 0)
+    {
+        bankRestoreLocked(gBank[part], gLive[part]);
+    }
+    p.exportData(out);
+}
+
+void patchBankValuesReplaced(const OpenPatch& p)
+{
+    const int part = liveOwner(&p);
+    if (part >= 0)
+    {
+        gBank[part].applied = false;
+    }
+}
+
+void patchBankPublish(int part, const OpenPatch& p, const PatchData& saved)
 {
     if (!partOk(part))
     {
         return;
     }
     OPEN_LOCK_AUDIO();
-    PartBank& b = gBank[part];
-    OpenPatch* p = gLive[part];
-    if (bankMatches(b, p) && !b.applied)
-    {
-        p->getValuesRaw(b.vals + size_t(b.cur) * size_t(b.nParams));
-        b.valid |= uint16_t(1u << b.cur);
-        b.from = -1;
-    }
+    bankPublishLocked(gBank[part], p, saved);
     OPEN_UNLOCK_AUDIO();
+}
+
+bool patchSaveOpenSlot(int part, Patch& live, PatchStore& workspace)
+{
+    if (!partOk(part))
+    {
+        return false;
+    }
+    char name[8];
+    patchSlotName(part, gBank[part].cur, name);
+    return static_cast<OpenPatchStore&>(workspace).saveSnapshot(static_cast<OpenPatch&>(live), name, part);
 }
 
 SlotSelect patchBankSelect(int part, int slot, Patch& patch, PatchStore& workspace)
@@ -1043,7 +1150,6 @@ SlotSelect patchBankSelect(int part, int slot, Patch& patch, PatchStore& workspa
     {
         return SlotSelect::kSame;
     }
-    patchBankRestore(part);
     OpenPatch& op = static_cast<OpenPatch&>(patch);
     OpenPatchStore& st = static_cast<OpenPatchStore&>(workspace);
     const EngineDef* def = op.getDef();
@@ -1064,13 +1170,19 @@ SlotSelect patchBankSelect(int part, int slot, Patch& patch, PatchStore& workspa
         return SlotSelect::kOtherEngine;
     }
     const int8_t origin = b.from >= 0 ? b.from : int8_t(b.cur); // the file a pending copy began from
+    // The new slot takes over in one audio-free window. The Patch FX may have run during the file read: its replaced values are not the
+    // values of either slot. A loaded file replaces every value (nothing is left to restore), a copy keeps the edited values of the old
+    // slot, so the shadow goes back.
+    OPEN_LOCK_AUDIO();
     if (state == OpenPatchStore::FileRead::kOk)
     {
-        OPEN_LOCK_AUDIO();
         op.importData(sc.data());
-        OPEN_UNLOCK_AUDIO();
+        b.applied = false;
     }
-    OPEN_LOCK_AUDIO();
+    else
+    {
+        bankRestoreLocked(b, &op);
+    }
     b.cur = uint8_t(slot);
     b.from = state == OpenPatchStore::FileRead::kOk ? int8_t(-1) : origin;
     OPEN_UNLOCK_AUDIO();
@@ -1084,7 +1196,6 @@ bool patchBankRevert(int part, Patch& patch, PatchStore& workspace)
         return false;
     }
     PartBank& b = gBank[part];
-    patchBankRestore(part);
     OpenPatch& op = static_cast<OpenPatch&>(patch);
     OpenPatchStore& st = static_cast<OpenPatchStore&>(workspace);
     const EngineDef* def = op.getDef();
@@ -1101,6 +1212,7 @@ bool patchBankRevert(int part, Patch& patch, PatchStore& workspace)
     }
     OPEN_LOCK_AUDIO();
     op.importData(sc.data());
+    b.applied = false; // the file's values are the open slot's now, whatever the FX had set aside
     OPEN_UNLOCK_AUDIO();
     return true;
 }
@@ -1181,8 +1293,9 @@ bool patchBackupRestore(int part, Patch& live, PatchStore& workspace)
     }
     OPEN_LOCK_AUDIO();
     op.importData(sc.data());
+    gBank[part].applied = false;
+    bankPublishLocked(gBank[part], op, sc.data());
     OPEN_UNLOCK_AUDIO();
-    patchBankCommit(part);
     return true;
 }
 

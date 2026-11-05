@@ -75,11 +75,15 @@ Backup patchBackupSave(int part, Patch& live, PatchStore& workspace);
 // that engine (the engine field of the file decides, as for every slot file) it becomes slot 0: written to <P>.patch, loaded into the
 // live patch and the bank. False: nothing changed, the caller loads Init.
 bool patchBackupRestore(int part, Patch& live, PatchStore& workspace);
-// Main thread: if the FX replaced the live values, put the edited values of the open slot back (call before reading or
-// saving the live patch, and before any edit).
+// Main thread: if the FX replaced the live values, put the edited values of the open slot back (the editor does it when a screen
+// shows the patch). Every write of a parameter does it by itself, in the same audio-free window, and a read of a parameter gives the
+// edited value while the FX has replaced it, so an edit made while the pattern plays is never undone by a later restore.
 void patchBankRestore(int part);
-// Main thread: the live patch was just written to the file of the open slot: the bank follows, the slot now has a file.
-void patchBankCommit(int part);
+// Main thread: writes the live patch of the part as the file of its open slot in `workspace` (<P>.patch for slot 0, <P>-n.patch
+// otherwise). The values the FX replaced go back and the patch is copied out in one audio-free window, so the file is the open slot
+// whatever the FX does meanwhile. On success the bank row of the slot is the values
+// that were written. False: nothing was written, the file and the bank are as they were.
+bool patchSaveOpenSlot(int part, Patch& live, PatchStore& workspace);
 
 enum class SlotSelect
 {
@@ -90,7 +94,7 @@ enum class SlotSelect
     kError,
 };
 // Main thread. Open slot `slot`. The caller saved the open slot first when it was dirty. Macros of the live patch come from
-// the file (kLoaded) or stay (kCopied).
+// the file (kLoaded) or stay (kCopied). The file's values, the current slot and the FX shadow change in one audio-free window.
 SlotSelect patchBankSelect(int part, int slot, Patch& patch, PatchStore& workspace);
 // Main thread: cancel of the library browser. Reloads the open slot from its file, or from the slot it was copied from.
 // False when there is nothing to reload.

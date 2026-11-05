@@ -62,14 +62,23 @@ struct MemFS : FileSystem {
     for (auto& [k, v] : files) if (k.compare(0, pre.size(), pre) == 0 && k.find('/', pre.size()) == std::string::npos && m(k.substr(pre.size()))) listed.push_back(k.substr(pre.size()));
     return std::vector<std::string_view>(listed.begin(), listed.end()); }
   std::optional<FileHandle> open(const std::string& path, OpenOptions o) override {
-    const bool w = o == OpenOptions::kWrite; if (!w && !files.count(path)) return std::nullopt; if (w) files[path].clear();
+    const bool w = o == OpenOptions::kWrite; if (!w && onRead) onRead(path);   // the audio callback runs while the card is read
+    if (!w && !files.count(path)) return std::nullopt; 
+    if (w) files[path].clear();
     hs.push_back(new H{path, 0, w}); openNow++; return hs.back(); }
   int openNow = 0; // open handles (FatFs on the device has a fixed table, a leak ends in failed opens)
   void close(FileHandle) override { openNow--; }
-  bool write(FileHandle h, std::span<const uint8_t> d) override { auto* x = (H*)h; files[x->path].insert(files[x->path].end(), d.begin(), d.end()); return true; }
-  int32_t read(FileHandle h, std::span<uint8_t> b) override { auto* x = (H*)h; auto& f = files[x->path]; size_t n = std::min(b.size(), f.size() - x->pos); std::copy_n(f.begin() + x->pos, n, b.begin()); x->pos += n; return (int32_t)n; }
+  bool write(FileHandle h, std::span<const uint8_t> d) override {
+    auto* x = (H*)h; if (onWrite) onWrite(x->path);                  // the audio callback runs while the card is written
+    files[x->path].insert(files[x->path].end(), d.begin(), d.end()); return true; }
+  int32_t read(FileHandle h, std::span<uint8_t> b) override { auto* x = (H*)h; auto& f = files[x->path];
+    size_t n = std::min(b.size(), f.size() - x->pos);
+    std::copy_n(f.begin() + x->pos, n, b.begin()); x->pos += n; return (int32_t)n; }
   bool seek(FileHandle, int) override { return true; }
   void createFolder(const std::string&) override {}
+  // hooks of the save and load tests
+  std::function<void(const std::string&)> onRead, onWrite;
+  void healthy() { onRead = nullptr; onWrite = nullptr; }
 };
 // A short heap, as on the device after a while: nothrow new (what the patch store and bank use) fails above gShortHeap bytes (0: off)
 static size_t gShortHeap = 0;
@@ -344,8 +353,11 @@ int main() {
     // ---- patch slots and the Patch step FX: <P>.patch is slot 0 (stock opens it), <P>-n.patch is slot n, all in the project
     {
       mw->files.clear();   // a clean Workspace
+      // the raw values of the patch: getParamValue gives the edited ones while the FX has replaced them, these tests look at what plays
       auto sameValues = [](Patch& a, Patch& b) { const size_t n = a.getMetadata().params.size(); bool same = n == b.getMetadata().params.size();
-        for (size_t i = 0; i < n && same; i++) same = *a.getParamValue(int(i)) == *b.getParamValue(int(i)); return same; };
+        float va[open::kMaxParams], vb[open::kMaxParams];
+        if (same) { static_cast<open::OpenPatch&>(a).getValuesRaw(va); static_cast<open::OpenPatch&>(b).getValuesRaw(vb); }
+        for (size_t i = 0; i < n && same; i++) same = va[i] == vb[i]; return same; };
       auto fill = [](Patch& p, float t) { const auto& m = p.getMetadata();
         for (size_t i = 0; i < m.params.size(); i++) { const float a = float(m.params[i].minValue), b = float(m.params[i].maxValue); p.setParamValue(int(i), a + (b - a) * t, Patch::ParamChangeSource::kKnob); } };
       auto nameOf = [](int part, int slot) { char n[8]; open::patchSlotName(part, slot, n); return std::string(n); };
@@ -403,7 +415,7 @@ int main() {
         // the user edits slot 4 and the project saves it: the file <P>-4.patch appears and the FX can use it
         fill(*live, 0.7f);
         auto seven = ws->createPatch(int(k.id)); fill(*seven, 0.7f);
-        ws->savePatch(nameOf(myPart, 4), *live); open::patchBankCommit(myPart);
+        open::patchSaveOpenSlot(myPart, *live, *ws);   // Synth::savePatchToWorkspace
         edits = edits && mw->files.count(nameOf(myPart, 4) + ".patch") == 1;
         edits = edits && open::patchBankSelect(myPart, 3, *live, *ws) == open::SlotSelect::kLoaded && sameValues(*live, *hi);
         edits = edits && open::patchBankApply(myPart, 4) && sameValues(*live, *seven) && open::patchBankApply(myPart, 3) && sameValues(*live, *hi);
@@ -647,7 +659,9 @@ int main() {
         for (int sl = 15; sl >= 0; sl--) {
           cyc = cyc && open::patchBankApply(pt, sl);
           const auto& m = live[pt]->getMetadata();
-          for (size_t i = 0; i < m.params.size() && cyc; i++) cyc = *live[pt]->getParamValue(int(i)) == *slotPatch[pt][sl]->getParamValue(int(i));
+          float got[open::kMaxParams], want[open::kMaxParams];   // what plays: getParamValue gives the edited values while the FX has replaced them
+          static_cast<open::OpenPatch&>(*live[pt]).getValuesRaw(got); static_cast<open::OpenPatch&>(*slotPatch[pt][sl]).getValuesRaw(want);
+          for (size_t i = 0; i < m.params.size() && cyc; i++) cyc = got[i] == want[i];
         }
         cyc = cyc && open::patchBankCurrent(pt) == 0;
       }
@@ -747,7 +761,7 @@ int main() {
         std::unique_ptr<Patch> live; int type = 0; std::string name, projName, slotNames[16], backupName; bool dirty = false;
       } m;
       auto savePart = [&]() {                                           // Synth::savePatchToWorkspace
-        open::patchBankRestore(0); ws->savePatch(nameOf(0, open::patchBankCurrent(0)), *m.live); open::patchBankCommit(0); m.dirty = false; };
+        open::patchSaveOpenSlot(0, *m.live, *ws); m.dirty = false; };
       auto persist = [&]() {                                            // Synth::persistSlotNames
         open::SlotNames nm; std::snprintf(nm.name[0], sizeof(nm.name[0]), "%s", m.backupName.c_str());
         const int cur = open::patchBankCurrent(0);
@@ -768,7 +782,7 @@ int main() {
         m.backupName = nm.name[0]; m.name = m.projName = slot0Name; m.dirty = false; return loaded; };
       auto selectSlot = [&](int slot) {                                 // Synth::selectPatchSlot
         const int prev = open::patchBankCurrent(0);
-        open::patchBankRestore(0); if (m.dirty) savePart();
+        if (m.dirty) savePart();
         const auto r = open::patchBankSelect(0, slot, *m.live, *ws);
         if (r == open::SlotSelect::kLoaded || r == open::SlotSelect::kCopied) {
           m.slotNames[prev] = m.name;
@@ -784,7 +798,7 @@ int main() {
         open::patchBankSetLive(0, fresh.get()); m.live = std::move(fresh); m.name = "Init";
         open::patchBankPreload(0, *m.live, *ws); m.slotNames[0].clear();
         if (open::patchBackupRestore(0, *m.live, *ws)) { m.name = m.backupName.empty() ? "Unnamed" : m.backupName; m.dirty = false; }   // Synth::restoreSlotZeroBackup
-        else { ws->createPatch(type); ws->savePatch("0", *m.live); open::patchBankCommit(0); m.dirty = false; }                        // initCurrentPatch -> initPatch
+        else { open::patchSaveOpenSlot(0, *m.live, *ws); m.dirty = false; }                        // initCurrentPatch -> initPatch
         m.projName = m.name;
         persist(); };                                                    // the autosave that follows
       auto sameAsFile = [&](const std::vector<uint8_t>& file) {          // the live patch holds the values of that file
@@ -867,6 +881,78 @@ int main() {
       mw->files.clear();
     }
 #endif
+    // ---- review blockers: edits while the Patch FX plays, the atomic save, a replaced patch, failed saves and copies, card read errors
+    {
+      mw->files.clear(); mw->openNow = 0; mw->healthy();
+      const int T = kLead;
+      auto nameOf = [](int part, int slot) { char n[8]; open::patchSlotName(part, slot, n); return std::string(n); };
+      auto raw = [](Patch& p) { std::vector<float> v(open::kMaxParams); static_cast<open::OpenPatch&>(p).getValuesRaw(v.data()); v.resize(p.getMetadata().params.size()); return v; };
+      auto fill = [](Patch& p, float t) { const auto& m = p.getMetadata();
+        for (size_t i = 0; i < m.params.size(); i++) { const float a = float(m.params[i].minValue), b = float(m.params[i].maxValue); p.setParamValue(int(i), a + (b - a) * t, Patch::ParamChangeSource::kKnob); } };
+      auto base = ws->createPatch(T), lo = ws->createPatch(T), hi = ws->createPatch(T), init = ws->createPatch(T);
+      fill(*base, 0.5f); fill(*lo, 0.1f); fill(*hi, 0.9f);
+      const auto baseV = raw(*base), loV = raw(*lo), hiV = raw(*hi), initV = raw(*init);
+      const float p0 = baseV[0], edit0 = p0 == float(base->getMetadata().params[0].maxValue) ? float(base->getMetadata().params[0].minValue) : float(base->getMetadata().params[0].maxValue);
+      auto editedV = baseV; editedV[0] = edit0;
+      check(baseV != loV && loV != hiV && baseV != initV && edit0 != p0, "review blockers: the test slots differ from each other and from Init");
+      // slot 0 = base, 1 = lo, 3 = hi on the card, the part's live patch loaded from slot 0, the bank built
+      auto setup = [&]() {
+        mw->files.clear(); mw->healthy(); ws->savePatch("0", *base); ws->savePatch("0-1", *lo); ws->savePatch("0-3", *hi);
+        auto live = ws->createPatch(T); ws->loadPatch("0", *live, true);
+        open::patchBankSetLive(0, live.get()); open::patchBankToSlotZero(0); open::patchBankPreload(0, *live, *ws); return live; };
+      auto fileValues = [&](const char* name) { auto p = ws->createPatch(T); return ws->loadPatch(name, *p, true) ? raw(*p) : std::vector<float>(); };
+      // B1: an edit made while the FX has slot 1 playing is not lost to the next restore, FX round trip or save
+      {
+        auto live = setup();
+        open::patchBankApply(0, 1);
+        bool ok = raw(*live) == loV && *live->getParamValue(0) == p0 && *live->getParamValueEditMapped(0) == *base->getParamValueEditMapped(0);   // reads: the edited value
+        live->setParamValue(0, edit0, Patch::ParamChangeSource::kKnob);                  // the knob (the caller holds the audio lock)
+        ok = ok && raw(*live) == editedV && *live->getParamValue(0) == edit0;            // the edit is on the edited values, the FX values are gone from the part
+        open::patchBankApply(0, 1); ok = ok && raw(*live) == loV;                        // the FX plays slot 1 again
+        open::patchBankApply(0, 0); ok = ok && raw(*live) == editedV;                    // and goes back to the open slot: the edit is there
+        open::patchBankApply(0, 3); open::patchBankRestore(0); ok = ok && raw(*live) == editedV;   // a restore keeps it too
+        open::patchBankApply(0, 3);
+        ok = ok && open::patchSaveOpenSlot(0, *live, *ws) && fileValues("0") == editedV;   // a save writes it
+        check(ok, "B1: a knob edit made while the Patch FX plays another slot survives the FX, a restore and a save");
+      }
+      // B2: the file is one patch and the bank row is what was written, whatever the FX does before and while the file is written
+      {
+        auto live = setup();
+        live->setParamValue(0, edit0, Patch::ParamChangeSource::kKnob);
+        open::patchBankApply(0, 1);                                                      // an FX step just before the save
+        int fxRuns = 0; mw->onWrite = [&](const std::string&) { fxRuns++; open::patchBankApply(0, 3); };   // and one while the file is written
+        bool ok = open::patchSaveOpenSlot(0, *live, *ws); mw->healthy();
+        ok = ok && fxRuns > 0 && fileValues("0") == editedV;                             // neither slot 1 nor slot 3 reached the file, no mixture
+        ok = ok && open::patchBankSelect(0, 1, *live, *ws) == open::SlotSelect::kLoaded && raw(*live) == loV;
+        ok = ok && open::patchBankApply(0, 0) && raw(*live) == editedV;                  // the bank row of slot 0 is what was written
+        check(ok, "B2: a save under FX steps writes the edited open slot and the bank follows the written values");
+      }
+      // B3: a replaced or loaded patch leaves no shadow of the previous one
+      {
+        auto live = setup();
+        open::patchBankApply(0, 1);                                                      // shadow = slot 0's values, FX values live
+        auto fresh = ws->createPatch(T);
+        open::patchBankSetLive(0, fresh.get());                                          // Synth::setPatch: Init
+        bool ok = open::patchBankApply(0, 0) && raw(*fresh) == initV;                    // the FX to the open slot does not write the old shadow
+        ok = ok && open::patchSaveOpenSlot(0, *fresh, *ws) && fileValues("0") == initV;  // Init is saved as Init
+        check(ok, "B3: Init after the FX ran saves the Init values, never the sound of the previous patch");
+        live = setup();
+        mw->onRead = [&](const std::string& path) { if (path == "0-1.patch") open::patchBankApply(0, 3); };   // the FX runs while slot 1 is read
+        ok = open::patchBankSelect(0, 1, *live, *ws) == open::SlotSelect::kLoaded; mw->healthy();
+        ok = ok && raw(*live) == loV;
+        open::patchBankRestore(0); ok = ok && raw(*live) == loV;                         // the next restore does not overwrite the loaded slot
+        live = setup(); live->setParamValue(0, edit0, Patch::ParamChangeSource::kKnob);
+        mw->onRead = [&](const std::string& path) { if (path == "0-2.patch") open::patchBankApply(0, 3); };   // slot 2 has no file: a copy of the open one
+        ok = ok && open::patchBankSelect(0, 2, *live, *ws) == open::SlotSelect::kCopied; mw->healthy();
+        ok = ok && raw(*live) == editedV && open::patchBankCurrent(0) == 2;              // the copy has the edited values, not slot 3's
+        live = setup(); open::patchBankApply(0, 1);
+        ok = ok && ws->loadPatch("0-3", *live, true); open::patchBankRestore(0); ok = ok && raw(*live) == hiV;   // a library load replaces the shadow too
+        check(ok, "B3: a slot loaded or copied while the FX runs, and a library load, are not undone by the next restore");
+      }
+      check(mw->openNow == 0, "review blockers: every file opened is closed again");
+      open::patchBankSetLive(0, nullptr);
+      mw->files.clear();
+    }
 #ifdef OT_ORACLE
     // OpenTracker's own codec as oracle: its Init patches load here and our files decode and re-encode there byte for byte
     bool oraOk = true; int engIds[4] = { ot::kSynthEngineAcd, ot::kSynthEngineFat, ot::kSynthEngineVap, ot::kSynthEngineWtfm };

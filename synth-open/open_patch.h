@@ -71,6 +71,9 @@ class OpenPatch final : public Patch
         return k;
     }
 
+    // The two getters give the edited value of the open slot: while the Patch FX has replaced the values they come from the bank's shadow
+    // row. A setter needs audio interrupts disabled by the caller (like importData): it puts the shadow back in that window first, so
+    // the edit is made on the edited values.
     optional_paramvalue_t getParamValue(int id) const override;
     tiny_optional<float> getParamValueEditMapped(int id) const override;
     void setParamValueEditMapped(int id, tiny_optional<float> v, ParamChangeSource src) override;

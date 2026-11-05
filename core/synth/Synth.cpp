@@ -205,12 +205,9 @@ void Synth::initPatch(int part)
 void Synth::savePatchToWorkspace(int part)
 {
 #ifdef FEATURE_SYNTH_OPEN
-    // the open slot's file: <P>.patch for slot 0, <P>-n.patch otherwise. A slot the Patch FX replaced goes back first.
-    polysynth::open::patchBankRestore(part);
-    char name[8];
-    polysynth::open::patchSlotName(part, polysynth::open::patchBankCurrent(part), name);
-    patchStoreWorkspace->savePatch(name, *parts[part].patch);
-    polysynth::open::patchBankCommit(part);
+    // The open slot's file: <P>.patch for slot 0, <P>-n.patch otherwise. A slot the Patch FX replaced goes back and the patch is copied
+    // out in one audio-free window, the file is written from that copy.
+    polysynth::open::patchSaveOpenSlot(part, *parts[part].patch, *patchStoreWorkspace);
 #else
     patchStoreWorkspace->savePatch(fmt::format("{}", part), *parts[part].patch);
 #endif
@@ -359,7 +356,6 @@ polysynth::open::SlotSelect Synth::selectPatchSlot(int part, int slot)
         return SlotSelect::kSame;
     }
 
-    polysynth::open::patchBankRestore(part);
     if (parts[part].patchDirty)
     {
         savePatchToWorkspace(part); // a dirty slot is written when it is left
