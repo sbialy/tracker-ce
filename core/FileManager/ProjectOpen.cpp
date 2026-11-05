@@ -10,6 +10,10 @@
 
 #include "log.h"
 
+#ifdef FEATURE_SYNTH_OPEN
+#include "open_bankcopy.h"
+#endif
+
 #include <cstring>
 
 void ProjectOpen::update()
@@ -348,44 +352,44 @@ void ProjectOpen::openProjectFinish()
                                                                cWorkspacePatternsMetadataFilePath);
     //------------ synth patches
 
-#ifdef FEATURE_SYNTH_OPEN
-    bool patchesCopied = true;
-#endif
 #if FILEMANAGER_HANDLE_SYNTH == 1
     snprintf(srcFilePath,
              pathSize,
              cProjectsPathFormat,
              newFileManager.getCurrentProjectPath(),
              newFileManager.getCurrentProjectName());
-
-#ifdef FEATURE_SYNTH_OPEN
-    // The copy replaces files whole and is safe to run again: one more try for a card error that was only a hiccup
-    patchesCopied = newFileManager.getSynth()->copyWorkspacePatches(srcFilePath, cWorkspacePath) ||
-                    newFileManager.getSynth()->copyWorkspacePatches(srcFilePath, cWorkspacePath);
-#else
-    newFileManager.getSynth()->copyWorkspacePatches(srcFilePath, cWorkspacePath);
-#endif
 #endif
 
     //-----------------------------------
 
+#ifdef FEATURE_SYNTH_OPEN
+    static_assert(FILEMANAGER_HANDLE_SYNTH == 1, "the open synth always has the bank copy");
+    // As in stock the result of the bank copy never decides the load: the requested project is loaded with the patch files the
+    // Workspace has (open_bankcopy.h retries the copy once). There is no popup for a failed copy: this runs in the file manager step
+    // and the load that follows owns the status. The audio engine restarts only at the end of that load.
+    polysynth::open::openProjectAfterBankCopy(
+      [&]() { return newFileManager.getSynth()->copyWorkspacePatches(srcFilePath, cWorkspacePath); },
+      []()
+      {
+          newFileManager.setStatus(fmIdle);
+          newFileManager.setCurrentOperation(fmNoOperation);
+      },
+      []() { return newFileManager.openProjectFromWorkspace(); },
+      []() { newFileManager.createNewProjectInWorkspace(); });
+#else
+#if FILEMANAGER_HANDLE_SYNTH == 1
+    newFileManager.getSynth()->copyWorkspacePatches(srcFilePath, cWorkspacePath);
+#endif
+
     newFileManager.setStatus(fmIdle);
     newFileManager.setCurrentOperation(fmNoOperation);
 
-#ifdef FEATURE_SYNTH_OPEN
-    // The audio engine is still stopped here and stays so until the load below has put a whole project in place (it restarts it).
-    // A bank copy that failed twice leaves the Workspace with some of the project's patches: not a project to load (a save would
-    // then prune the missing slots from the project folder), and not a reason to restart audio on the old runtime content with the
-    // new project's settings in mtProject (what operationError does). The project in the Projects folder is untouched: this ends
-    // in the empty project of the open fallback below, a new open can try again.
-    if (!patchesCopied || !newFileManager.openProjectFromWorkspace())
-#else
     if (!newFileManager.openProjectFromWorkspace())
-#endif
     {
         newFileManager.createNewProjectInWorkspace();
         newFileManager.openProjectFromWorkspace();
     }
+#endif
 
     newFileManager.setStatus(fmLoadingProjectFromProjects); // force right status
 }

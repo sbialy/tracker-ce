@@ -94,4 +94,24 @@ bool copyPartBank(Ops& ops, int part, const std::string& srcDir, const std::stri
     return true;
 }
 
+// Project open, after the project's own files are in the Workspace: copies the patch bank, then loads the requested project.
+// As in stock the result of the bank copy never decides the load, a patch error is not a reason to dispose of the copied song, patterns
+// and samples (a new empty project would): the copy is tried once more (it replaces files whole, so it is safe to run again) and the
+// project loads with the patch files the Workspace has. Only a Workspace that cannot be opened at all falls back to a new project.
+// `settle` runs between the copy and the first load attempt. The audio engine restarts only in the normal load.
+template <class Copy, class Settle, class Open, class CreateNew>
+void openProjectAfterBankCopy(Copy copy, Settle settle, Open open, CreateNew createNew)
+{
+    if (!copy())
+    {
+        copy();
+    }
+    settle();
+    if (!open())
+    {
+        createNew();
+        open();
+    }
+}
+
 } // namespace polysynth::open

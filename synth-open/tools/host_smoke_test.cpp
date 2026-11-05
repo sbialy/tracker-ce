@@ -1044,6 +1044,27 @@ int main() {
              && !D.count("0-6.patch") && !D.count("0-6.patch.bak") && !D.count("0-b.patch");   // a pruned slot takes its .bak with it, the others are not pruned
         check(ok, "N1: the bank copy takes a file from <file>.bak when the canonical one is gone, and prunes a slot together with its .bak");
       }
+      // R3-B1: project open (ProjectOpen::openProjectFinish): a bank copy that fails twice loads the requested project like stock, it never
+      // falls into the new empty project (that deletes the copied Workspace), and the copy gets exactly one retry
+      {
+        auto flow = [](int copyOk, bool workspaceOpens, int& copies, int& created, int& opens, int& settled) {
+          copies = created = opens = settled = 0;
+          open::openProjectAfterBankCopy([&]() { return ++copies > copyOk; },       // the first `copyOk` calls fail
+                                         [&]() { settled++; },
+                                         [&]() { opens++; return workspaceOpens || created > 0; },
+                                         [&]() { created++; });
+        };
+        int copies, created, opens, settled;
+        flow(2, true, copies, created, opens, settled);                                            // fails twice: loads the requested project
+        bool ok = copies == 2 && created == 0 && opens == 1 && settled == 1;
+        flow(1, true, copies, created, opens, settled);                                            // a hiccup, the retry works
+        ok = ok && copies == 2 && created == 0 && opens == 1;
+        flow(0, true, copies, created, opens, settled);                                            // no error: one copy only
+        ok = ok && copies == 1 && created == 0 && opens == 1;
+        flow(2, false, copies, created, opens, settled);                                           // a Workspace that cannot be opened keeps the stock fallback
+        ok = ok && created == 1 && opens == 2;
+        check(ok, "R3-B1: a bank copy that fails twice still loads the requested project, the empty project stays for a Workspace that cannot open");
+      }
       // N1: replaceFileOps over a card with FatFs rename rules, any rename failing and the power going at any step. The old file is never lost:
       // after the reader's recovery the file is the old one or the new one, and a replace that said true leaves the new one
       {
