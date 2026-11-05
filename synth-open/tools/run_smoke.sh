@@ -24,7 +24,7 @@ for s in $CORE; do SRCS_ABS="$SRCS_ABS $ROOT/core/$s"; done
 OUT=${TMPDIR:-/tmp}/synth_smoke_$$
 clang++ -arch x86_64 -std=c++20 -O1 "-D_GLIBCXX_THROW_OR_ABORT(x)=__builtin_abort()" \
   -I "$ROOT/synth/include" -I "$ROOT/util/include" -I "$ROOT/util/3rdparty" -I "$ROOT/synth-open" -I "$ROOT/synth-open/ot" -I "$ROOT/core/synth" -I "$ROOT/core/config" \
-  -DFEATURE_SYNTH -DFEATURE_SYNTH_OPEN -DOPEN_HOST_TEST ${TRIM:+-DFW_TRIM} $DEFS \
+  -DFEATURE_SYNTH -DFEATURE_SYNTH_OPEN -DOPEN_HOST_TEST "-DSMOKE_FIXTURES=\"$ROOT/synth-open/tools/fixtures\"" ${TRIM:+-DFW_TRIM} $DEFS \
   "$ROOT/synth-open/tools/host_smoke_test.cpp" "$ROOT/synth-open/open_synth.cpp" "$ROOT/synth-open/open_cold.cpp" \
   "$ROOT/synth-open/open_patchio.cpp" "$ROOT/synth-open/stub_fmt.cpp" $SRCS_ABS "$ROOT/synth-open/ot/audio/governor.cpp" "$ROOT/synth-open/ot/audio/cpu_meter.cpp" \
   -o "$OUT"

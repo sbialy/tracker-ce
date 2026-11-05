@@ -24,7 +24,9 @@
 #ifdef OPEN_HOST_TEST
 #define OPEN_LOCK_AUDIO()   ((void)0)
 #define OPEN_UNLOCK_AUDIO() ((void)0)
+#define OPEN_EXTERNAL_RAM
 #else
+#define OPEN_EXTERNAL_RAM __attribute__((section(".noinit.$EXTERNAL_RAM"))) // the SDRAM, as __NOINIT(EXTERNAL_RAM)
 #include "interruptsControl.h"
 #define OPEN_LOCK_AUDIO()   DISABLE_AUDIO_INTERRUPTS()
 #define OPEN_UNLOCK_AUDIO() ENABLE_AUDIO_INTERRUPTS()
@@ -536,16 +538,52 @@ void OpenPatch::importData(const PatchData& d)
 
 namespace
 {
-// Heap buffers of the file paths. On the MK66 operator new is a plain malloc (teensy_core/new.cpp) and returns null when the heap is
-// short, so std::make_unique would zero-fill from address 0 and fault. These return null instead and the callers give up cleanly.
+// Heap buffer of the slot names file (1 KB). On the MK66 operator new is a plain malloc (teensy_core/new.cpp) and returns null when the
+// heap is short, so std::make_unique would zero-fill from address 0 and fault. This returns null instead and the callers give up cleanly.
 inline std::unique_ptr<uint8_t[]> tryBytes(size_t n)
 {
     return std::unique_ptr<uint8_t[]>(new (std::nothrow) uint8_t[n]);
 }
-inline std::unique_ptr<PatchData> tryPatchData()
+
+// The buffers of every .patch read and write (store and bank): the file bytes and the decoded data, 9.8 KB. They live in the SDRAM,
+// not on the heap: on the device the heap had no 8 KB block left after a while and every slot select failed ("Error loading slot").
+// Main thread only and never nested. A second lease while one is held gets nothing and its caller fails cleanly.
+struct PatchScratch
 {
-    return std::unique_ptr<PatchData>(new (std::nothrow) PatchData());
-}
+    uint8_t file[kPatchFileMax + 1];
+    PatchData data;
+};
+OPEN_EXTERNAL_RAM PatchScratch gPatchScratch;
+bool gPatchScratchBusy = false;
+
+class ScratchLease
+{
+  public:
+    ScratchLease()
+    {
+        if (!gPatchScratchBusy)
+        {
+            gPatchScratchBusy = true;
+            s = &gPatchScratch;
+            new (&s->data) PatchData(); // fresh: the SDRAM is not initialised
+        }
+    }
+    ~ScratchLease()
+    {
+        if (s)
+        {
+            gPatchScratchBusy = false;
+        }
+    }
+    ScratchLease(const ScratchLease&) = delete;
+    ScratchLease& operator=(const ScratchLease&) = delete;
+    explicit operator bool() const { return s != nullptr; }
+    uint8_t* buf() const { return s->file; }
+    PatchData& data() const { return s->data; }
+
+  private:
+    PatchScratch* s = nullptr;
+};
 
 class OpenPatchStore final : public PatchStore
 {
@@ -612,21 +650,20 @@ class OpenPatchStore final : public PatchStore
         {
             return false;
         }
-        auto buf = tryBytes(kPatchFileMax + 1);
-        auto data = tryPatchData();
-        if (!buf || !data || readPatchFile(def, op.typeId(), name, buf.get(), *data) != FileRead::kOk)
+        ScratchLease sc;
+        if (!sc || readPatchFile(def, op.typeId(), name, sc.buf(), sc.data()) != FileRead::kOk)
         {
             return false;
         }
         if (synchronizeAudio)
         {
             OPEN_LOCK_AUDIO();
-            op.importData(*data);
+            op.importData(sc.data());
             OPEN_UNLOCK_AUDIO();
         }
         else
         {
-            op.importData(*data);
+            op.importData(sc.data());
         }
         return true;
     }
@@ -638,15 +675,15 @@ class OpenPatchStore final : public PatchStore
         {
             return false;
         }
-        auto data = tryPatchData();
-        constexpr size_t kCap = 4096;
-        auto buf = tryBytes(kCap);
-        if (!data || !buf)
+        constexpr size_t kCap = 4096; // every file this writes is at most 4 KB
+        static_assert(kCap <= sizeof(PatchScratch::file));
+        ScratchLease sc;
+        if (!sc)
         {
             return false;
         }
-        op.exportData(*data);
-        const size_t n = encodePatch(*data, buf.get(), kCap);
+        op.exportData(sc.data());
+        const size_t n = encodePatch(sc.data(), sc.buf(), kCap);
         if (n == 0)
         {
             return false;
@@ -660,7 +697,7 @@ class OpenPatchStore final : public PatchStore
         {
             return false;
         }
-        const bool ok = fs->write(*h, std::span<const uint8_t>(buf.get(), n));
+        const bool ok = fs->write(*h, std::span<const uint8_t>(sc.buf(), n));
         fs->close(*h);
         return ok;
     }
@@ -853,16 +890,15 @@ void patchBankPreload(int part, Patch& patch, PatchStore& workspace)
     }
     if (nb.vals)
     {
-        auto buf = tryBytes(kPatchFileMax + 1);
-        auto data = tryPatchData();
-        for (int i = 0; buf && data && i < kPatchBankSlots; i++) // no buffers: an empty bank, the FX does nothing
+        ScratchLease sc;
+        for (int i = 0; sc && i < kPatchBankSlots; i++) // no buffers: an empty bank, the FX does nothing
         {
             char name[8];
             patchSlotName(part, i, name);
-            new (data.get()) PatchData(); // fresh in place: `*data = PatchData()` put a 1.6 KB temporary on the stack
-            if (st.readPatchFile(def, nb.typeId, name, buf.get(), *data) == OpenPatchStore::FileRead::kOk)
+            new (&sc.data()) PatchData(); // fresh in place: `data = PatchData()` put a 1.6 KB temporary on the stack
+            if (st.readPatchFile(def, nb.typeId, name, sc.buf(), sc.data()) == OpenPatchStore::FileRead::kOk)
             {
-                op.valuesFromData(*data, nb.vals + size_t(i) * size_t(n));
+                op.valuesFromData(sc.data(), nb.vals + size_t(i) * size_t(n));
                 nb.valid |= uint16_t(1u << i);
             }
         }
@@ -956,13 +992,12 @@ SlotSelect patchBankSelect(int part, int slot, Patch& patch, PatchStore& workspa
     }
     char name[8];
     patchSlotName(part, slot, name);
-    auto buf = tryBytes(kPatchFileMax + 1);
-    auto data = tryPatchData();
-    if (!buf || !data)
+    ScratchLease sc;
+    if (!sc)
     {
         return SlotSelect::kError;
     }
-    const auto state = st.readPatchFile(def, op.typeId(), name, buf.get(), *data);
+    const auto state = st.readPatchFile(def, op.typeId(), name, sc.buf(), sc.data());
     if (state == OpenPatchStore::FileRead::kOther)
     {
         return SlotSelect::kOtherEngine;
@@ -971,7 +1006,7 @@ SlotSelect patchBankSelect(int part, int slot, Patch& patch, PatchStore& workspa
     if (state == OpenPatchStore::FileRead::kOk)
     {
         OPEN_LOCK_AUDIO();
-        op.importData(*data);
+        op.importData(sc.data());
         OPEN_UNLOCK_AUDIO();
     }
     OPEN_LOCK_AUDIO();
@@ -998,14 +1033,13 @@ bool patchBankRevert(int part, Patch& patch, PatchStore& workspace)
     }
     char name[8];
     patchSlotName(part, b.from >= 0 ? b.from : b.cur, name);
-    auto buf = tryBytes(kPatchFileMax + 1);
-    auto data = tryPatchData();
-    if (!buf || !data || st.readPatchFile(def, op.typeId(), name, buf.get(), *data) != OpenPatchStore::FileRead::kOk)
+    ScratchLease sc;
+    if (!sc || st.readPatchFile(def, op.typeId(), name, sc.buf(), sc.data()) != OpenPatchStore::FileRead::kOk)
     {
         return false;
     }
     OPEN_LOCK_AUDIO();
-    op.importData(*data);
+    op.importData(sc.data());
     OPEN_UNLOCK_AUDIO();
     return true;
 }

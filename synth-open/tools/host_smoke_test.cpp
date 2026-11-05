@@ -28,6 +28,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <new>
 #include <string>
 #include <vector>
 #ifdef SYNTH_ENGINE_PHZ
@@ -69,6 +71,10 @@ struct MemFS : FileSystem {
   bool seek(FileHandle, int) override { return true; }
   void createFolder(const std::string&) override {}
 };
+// A short heap, as on the device after a while: nothrow new (what the patch store and bank use) fails above gShortHeap bytes (0: off)
+static size_t gShortHeap = 0;
+void* operator new(size_t n, const std::nothrow_t&) noexcept { return gShortHeap && n > gShortHeap ? nullptr : std::malloc(n); }
+void* operator new[](size_t n, const std::nothrow_t&) noexcept { return gShortHeap && n > gShortHeap ? nullptr : std::malloc(n); }
 int main() {
   auto synth = Synth::createSynth([](size_t){return nullptr;});
   auto store = synth->createPatchStore(Synth::FileSystemId::kPatches, true);
@@ -446,6 +452,69 @@ int main() {
       check(nKinds < 2 || engineKeeps, "engine change: old slot files stay, are ignored and cannot be opened, empty slots still open");
       check(nKinds < 2 || engineBack, "engine change: switching back brings slots 1..15 of that engine back, slot 0 is the new Init");
     }
+    // ---- real files from the device (project "OT Test 07 - VAP Only", one VAP part, saved by 1.1.0): slot 0 and slots 1..3 load,
+    // slot 4 (named, never saved) opens as a copy, the names file reads (SMOKE_FIXTURES = synth-open/tools/fixtures)
+#if defined(SMOKE_FIXTURES) && defined(SYNTH_ENGINE_VAP)
+    {
+      mw->files.clear();
+      bool readAll = true;
+      for (const char* f : {"0.patch", "0-1.patch", "0-2.patch", "0-3.patch", "0.names"}) {
+        FILE* fp = std::fopen((std::string(SMOKE_FIXTURES) + "/ot-test-07/" + f).c_str(), "rb");
+        readAll = readAll && fp; if (!fp) continue;
+        auto& v = mw->files[f]; uint8_t b[4096]; size_t got; while ((got = std::fread(b, 1, sizeof(b), fp)) > 0) v.insert(v.end(), b, b + got);
+        std::fclose(fp);
+      }
+      check(readAll, "device files: fixtures ot-test-07 read");
+      bool dec = true;
+      for (const char* f : {"0.patch", "0-1.patch", "0-2.patch", "0-3.patch"}) {
+        open::PatchData pd; const auto& v = mw->files[f];
+        const bool ok = open::decodePatch(v.data(), v.size(), pd) && open::typeForEngineId(pd.engine) == int(InstrumentTypeId::kVASynth);
+        printf("  %s: %zu B, engine %d, %d params, %d macros -> %s\n", f, v.size(), int(pd.engine), pd.nParams, pd.nMacros, ok ? "VAP" : "REFUSED");
+        dec = dec && ok;
+      }
+      check(dec, "device files: 0.patch and 0-1..0-3.patch decode as VAP");
+      auto live = ws->createPatch(int(InstrumentTypeId::kVASynth));
+      bool walk = ws->loadPatch("0", *live, true);
+      open::patchBankSetLive(0, live.get());
+      open::patchBankToSlotZero(0);
+      open::patchBankPreload(0, *live, *ws);
+      for (int sl : {1, 2, 3}) walk = walk && open::patchBankApply(0, sl);
+      open::patchBankApply(0, 0);
+      using SS = open::SlotSelect;
+      const struct { int slot; SS want; } steps[] = {{1, SS::kLoaded}, {2, SS::kLoaded}, {3, SS::kLoaded}, {4, SS::kCopied}, {3, SS::kLoaded}, {0, SS::kLoaded}, {2, SS::kLoaded}, {0, SS::kLoaded}};
+      auto walkSlots = [&](bool& ok) {
+        for (const auto& st : steps) {
+          const SS got = open::patchBankSelect(0, st.slot, *live, *ws);
+          if (got != st.want) printf("  slot %d: select gave %d, want %d\n", st.slot, int(got), int(st.want));
+          ok = ok && got == st.want;
+        }
+      };
+      walkSlots(walk);
+      check(walk, "device files: preload has slots 1..3, the editor walks 1 2 3 4 3 0 2 0 with no error");
+      // the device error: no 8 KB block left on the heap, every slot select gave kError ("Error loading slot")
+      gShortHeap = 4096;   // the FX bank of a VAP part (17 x 60 floats, 4080 B) still fits, the old 8 KB read buffer does not
+      bool shortWalk = ws->loadPatch("0", *live, true);
+      open::patchBankToSlotZero(0);
+      open::patchBankPreload(0, *live, *ws);
+      for (int sl : {1, 2, 3}) shortWalk = shortWalk && open::patchBankApply(0, sl);
+      open::patchBankApply(0, 0);
+      if (!shortWalk) printf("  short heap: load or preload failed\n");
+      walkSlots(shortWalk);
+      auto saved = ws->createPatch(int(InstrumentTypeId::kVASynth));
+      const bool sv = ws->savePatch("short", *live), ld = ws->loadPatch("short", *saved, true), rv = open::patchBankRevert(0, *live, *ws);
+      if (!sv || !ld || !rv) printf("  short heap: save %d load %d revert %d\n", sv, ld, rv);
+      shortWalk = shortWalk && sv && ld && rv;
+      mw->files.erase("short.patch");
+      gShortHeap = 0;
+      check(shortWalk, "device files, no heap block over 4 KB: load, preload, walk, save and revert still work");
+      open::SlotNames nm;
+      const bool names = open::patchNamesRead(0, *ws, nm) && std::strcmp(nm.name[1], "Brass Tacks") == 0 && std::strcmp(nm.name[2], "M1 Organ") == 0 &&
+                         std::strcmp(nm.name[3], "Ratio") == 0 && std::strcmp(nm.name[4], "Ratio") == 0;
+      check(names, "device files: 0.names gives Brass Tacks, M1 Organ, Ratio, Ratio for slots 1..4");
+      open::patchBankSetLive(0, nullptr);
+      mw->files.clear();
+    }
+#endif
     // ---- slot names side file <P>.names (open_slotnames.h codec, patchNamesRead / patchNamesWrite on the Workspace store)
     {
       mw->files.clear();
