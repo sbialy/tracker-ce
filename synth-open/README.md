@@ -240,7 +240,7 @@ Mix is 100 % for all of them. Drive, Bits, Rate and Tone are the original's para
 | Dirt Hard | +8,341 | +1.60 |
 | a silent bus | about 0 | about 0 |
 
-Against the last device readings (max 76 %, avg 50 % on the test song, see Summary under Audio CPU optimisations) that is at most 2.6 points on top of the peak. Flash: the insert costs 2,200 B in the 16 engine TRIM image (`ffdirt::process` 1,148, `makeCoef` 372, `update` 348, presets and names about 120, the rest list text and glue). The whole release image ends at 0xFAFB0 (1,028,016 B, 16,464 B under 0xFF000).
+Against the last device readings (max 76 %, avg 50 % on the test song, see Summary under Audio CPU optimisations) that is at most 2.6 points on top of the peak. Flash: the insert costs 2,200 B in the 16 engine TRIM image (`ffdirt::process` 1,148, `makeCoef` 372, `update` 348, presets and names about 120, the rest list text and glue). The whole release image ends at 0xFB368 (1,028,968 B, 15,512 B under 0xFF000).
 
 **Checks.** `tools/dirt_render.sh` renders a synthetic loop dry and through each entry into `build/dirt-wav/` and checks that wet 0 passes the input bit for bit, that a full scale square followed by silence leaves a finite state and that silence in gives silence out (the quantiser entry has its half step). `tools/dirt_cycles/run_bench.sh check` runs the firmware build of the per block code in the emulator and compares its output block with the host code: 0 LSB difference for all five entries. Not done: a device run, and the audio graph bench (`tools/audio_opt`) does not contain the insert.
 
@@ -273,9 +273,9 @@ Sizes are text+data from `arm-none-eabi-size` against the cap of 1,044,480 B, to
 
 | Build | text+data | free | highest .ptf address |
 |---|---:|---:|---|
-| `SYNTH_OPEN=1 TRIM=1`, the 16 release engines (Dirt insert on, the default) | 1,028,016 | 16,464 | 0xFAFB0 |
+| `SYNTH_OPEN=1 TRIM=1`, the 16 release engines (Dirt insert on, the default) | 1,028,968 | 15,512 | 0xFB368 |
 
-The highest image end known to boot on a device is 0xFC2AC (1,032,876 B, an early pre-release image), so the release image ends 4,860 B below it. Without TRIM the 16 engine set does not link. The flash cost of each engine in the 16 engine TRIM link (`make synth-engines TRIM=1`, within about 1 KB of the real marginal cost) is ACD 9,374, FAT 12,952, VAP 15,514, WTFM 14,793, PERC 23,655, CHIP 10,685, JU6 6,108, PHZ 15,154, FM4 7,291, DTYPE 9,868, CSTYPE 10,507, ATYPE 9,989, TTYPE 14,025, 8TYPE 15,474, BTYPE 9,740 and ARCTYPE 13,939 B, with a base of about 824,800 B without engines. HANDTYPE costs about 9,140 B when it is picked. Re-run the target for exact figures, they move with every merge.
+The highest image end known to boot on a device is 0xFC2AC (1,032,876 B, an early pre-release image), so the release image ends 3,908 B below it. Without TRIM the 16 engine set does not link. The flash cost of each engine in the 16 engine TRIM link (`make synth-engines TRIM=1`, within about 1 KB of the real marginal cost) is ACD 9,374, FAT 12,952, VAP 15,514, WTFM 14,793, PERC 23,655, CHIP 10,685, JU6 6,108, PHZ 15,154, FM4 7,291, DTYPE 9,868, CSTYPE 10,507, ATYPE 9,989, TTYPE 14,025, 8TYPE 15,474, BTYPE 9,740 and ARCTYPE 13,939 B, with a base of about 824,800 B without engines. HANDTYPE costs about 9,140 B when it is picked. Re-run the target for exact figures, they move with every merge.
 
 RAM of the 16 engine TRIM image (`-print-memory-usage`): about 139.3 KB of 256 KB (`.data` 5.7 KB, `.bss` 110.2 KB, `.dmabuffers` 20.7 KB) and about 15.6 MB of the 16 MB SDRAM. Static RAM of the engine objects: JU6 1,536 B (chorus lines), T-Type 48 B and PERC 48 B, the other engines 0 B of `.bss` and 8 to 12 B of `.data`. The remaining flash levers, none of them needed now: a printf smaller than nano's float one (about 7.5 KB) and font recompression.
 
