@@ -61,6 +61,12 @@ void patchBankToSlotZero(int part);
 static_assert(kSlotNameSlots == kPatchBankSlots, "one name per slot");
 bool patchNamesRead(int part, PatchStore& workspace, SlotNames& out);
 bool patchNamesWrite(int part, PatchStore& workspace, const SlotNames& in);
+// The names of a project save. `names` holds what the part has in memory (an empty name is "not named"). When the load could not read the
+// names file (a card error, the part's names are then all empty in memory) the file is read again first and its names fill every slot
+// the memory leaves empty, so the names on the card survive and the edits made since are kept (`names` then holds the merged set, the
+// caller takes it back). When it still cannot be read the file is left untouched and this is true: there is nothing to save, the next
+// save tries again, and stock has no names file to fail the project save for. False only when the file could not be written.
+bool patchNamesPersist(int part, PatchStore& workspace, SlotNames& names);
 // Engine change, main thread, the old engine still live and its slot 0 file (<P>.patch) up to date: keeps that file as <P>-b.patch.
 // kSkipped: there is nothing to keep, slot 0 is an untouched Init (the bytes of a new patch of the engine), has no file or no file of the live
 // engine, an older backup stays. kFailed: the card failed (slot 0 could not be read, or the backup could not be written): slot 0 may be a

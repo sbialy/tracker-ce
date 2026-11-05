@@ -326,7 +326,20 @@ bool Synth::persistSlotNames(int part)
             snprintf(names->name[slot], sizeof(names->name[slot]), "%s", name.c_str());
         }
     }
-    return polysynth::open::patchNamesWrite(part, *patchStoreWorkspace, *names);
+    // when the load could not read the names file this reads it again and merges (open_load.h), the names on the card are not lost
+    const bool ok = polysynth::open::patchNamesPersist(part, *patchStoreWorkspace, *names);
+    for (int slot = 1; slot < kPatchSlots; slot++)
+    {
+        if (slot != cur && names->name[slot][0] && (parts[part].slotNames[slot].empty() || parts[part].slotNames[slot] == "Unnamed"))
+        {
+            parts[part].slotNames[slot] = names->name[slot]; // a name that the memory lacked and the card had
+        }
+    }
+    if (parts[part].backupName.empty() && names->name[0][0])
+    {
+        parts[part].backupName = names->name[0];
+    }
+    return ok;
 }
 
 bool Synth::backupSlotZero(int part, const char* slotZeroName)

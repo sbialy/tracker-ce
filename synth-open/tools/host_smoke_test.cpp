@@ -1217,6 +1217,28 @@ int main() {
         ok = ok && open::patchNamesRead(0, *ws, back) && std::strcmp(back.name[1], "Lead one") == 0 && open::patchNamesWrite(0, *ws, back);
         check(ok, "S1: a read error ends a patch or names read as an error, no prefix is taken for the file and empty names do not replace unread ones");
       }
+      // R3-B2: one card error while the project load reads the names must not fail every later project save. The save reads the names again
+      // (Synth::persistSlotNames), keeps the names on the card, merges the edits made since, and when the file still cannot be read it
+      // leaves the file alone and does not fail the save
+      {
+        mw->healthy();
+        open::SlotNames nm; std::snprintf(nm.name[1], sizeof(nm.name[1]), "Lead one"); std::snprintf(nm.name[3], sizeof(nm.name[3]), "Pad");
+        bool ok = open::patchNamesWrite(0, *ws, nm);
+        const auto names = mw->files["0.names"]; open::SlotNames back;
+        mw->failOpenRead = { "0.names" };                                                       // the load: the names file does not open once
+        ok = ok && !open::patchNamesRead(0, *ws, back);
+        open::SlotNames mem; std::snprintf(mem.name[2], sizeof(mem.name[2]), "Mine");           // what the part has in memory: all empty but an edit
+        ok = ok && open::patchNamesPersist(0, *ws, mem) && mw->files["0.names"] == names && !mem.name[1][0];   // still failing: saved, file untouched
+        mw->healthy();                                                                          // the card recovers
+        ok = ok && open::patchNamesPersist(0, *ws, mem) && std::strcmp(mem.name[1], "Lead one") == 0;          // the save succeeds, merged set handed back
+        ok = ok && open::patchNamesRead(0, *ws, back) && std::strcmp(back.name[1], "Lead one") == 0 && std::strcmp(back.name[2], "Mine") == 0 && std::strcmp(back.name[3], "Pad") == 0;
+        mw->failOpenRead = { "0.names" };                                                       // a second hiccup, edit of a slot the card also names
+        ok = ok && !open::patchNamesRead(0, *ws, back);
+        open::SlotNames mem2; std::snprintf(mem2.name[1], sizeof(mem2.name[1]), "Edited");
+        mw->healthy();
+        ok = ok && open::patchNamesPersist(0, *ws, mem2) && open::patchNamesRead(0, *ws, back) && std::strcmp(back.name[1], "Edited") == 0 && std::strcmp(back.name[2], "Mine") == 0 && std::strcmp(back.name[3], "Pad") == 0;   // the memory wins, the rest stays
+        check(ok, "R3-B2: a names file that was unreadable at load is read again at save: names kept, edits merged, an unreadable file does not fail the save");
+      }
       check(mw->openNow == 0, "review blockers: every file opened is closed again");
       open::patchBankSetLive(0, nullptr);
       mw->files.clear();

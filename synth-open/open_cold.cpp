@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <new>
 #include <type_traits>
 #include <vector>
@@ -1065,6 +1066,35 @@ bool patchNamesWrite(int part, PatchStore& workspace, const SlotNames& in)
     }
     const size_t n = encodeSlotNames(in, buf.get(), kSlotNamesFileMax);
     return n > 0 && st.writeRaw(file, buf.get(), n);
+}
+
+bool patchNamesPersist(int part, PatchStore& workspace, SlotNames& names)
+{
+    if (!partOk(part))
+    {
+        return false;
+    }
+    if (gNamesUnreadable[part])
+    {
+        std::unique_ptr<SlotNames> card(new (std::nothrow) SlotNames()); // 512 B, off the shared stack
+        if (!card)
+        {
+            return true; // heap short: still unread, the file stays as it is
+        }
+        patchNamesRead(part, workspace, *card); // clears the flag when the file reads (or is not there), sets it again on a card error
+        if (gNamesUnreadable[part])
+        {
+            return true; // still unread: the file stays as it is, nothing is written from an empty table
+        }
+        for (int slot = 0; slot < kSlotNameSlots; slot++)
+        {
+            if (!names.name[slot][0])
+            {
+                std::memcpy(names.name[slot], card->name[slot], sizeof(names.name[slot]));
+            }
+        }
+    }
+    return patchNamesWrite(part, workspace, names);
 }
 
 void patchBankSetLive(int part, Patch* patch)
