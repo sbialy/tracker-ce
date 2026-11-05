@@ -296,6 +296,47 @@ namespace open
 
 // ------------------------------------------------------------------- patch
 
+// The pool of OpenPatch objects (3,036 B each on the MK66), in the SDRAM. A part holds one live patch, a new one is made before the old is
+// freed (engine change, init) and the Synth keeps a few spare references, so 5 is enough. Main thread only, like every create and free of a
+// patch. A full pool falls back to the heap, as before.
+namespace
+{
+constexpr int kPatchPoolSize = 5;
+struct PatchPoolSlot
+{
+    alignas(8) unsigned char bytes[(sizeof(OpenPatch) + 7) & ~size_t(7)];
+};
+OPEN_EXTERNAL_RAM PatchPoolSlot gPatchPool[kPatchPoolSize];
+bool gPatchPoolUsed[kPatchPoolSize];
+} // namespace
+
+void* OpenPatch::operator new(size_t n)
+{
+    if (n <= sizeof(PatchPoolSlot::bytes))
+    {
+        for (int i = 0; i < kPatchPoolSize; i++)
+        {
+            if (!gPatchPoolUsed[i])
+            {
+                gPatchPoolUsed[i] = true;
+                return gPatchPool[i].bytes;
+            }
+        }
+    }
+    return ::operator new(n);
+}
+
+void OpenPatch::operator delete(void* p) noexcept
+{
+    const auto* b = static_cast<const unsigned char*>(p);
+    if (b >= reinterpret_cast<const unsigned char*>(gPatchPool) && b < reinterpret_cast<const unsigned char*>(gPatchPool + kPatchPoolSize))
+    {
+        gPatchPoolUsed[(b - reinterpret_cast<const unsigned char*>(gPatchPool)) / sizeof(PatchPoolSlot)] = false;
+        return;
+    }
+    ::operator delete(p);
+}
+
 OpenPatch::OpenPatch(int typeId, const InstrumentType* type)
   : def(open::engineDefForType(typeId))
 {
@@ -796,10 +837,14 @@ struct PartBank
     uint8_t cur = 0;       // the slot open in the editor: the live patch holds its values
     int8_t from = -1;      // cur has no file yet: it began as a copy of this slot (-1: it has a file)
     bool applied = false;  // the FX replaced the live values, the edited ones wait in the last row of vals
-    float* vals = nullptr; // (kPatchBankSlots + 1) * nParams: slot rows, then the shadow row
+    float* vals = nullptr; // gBankVals[part]: (kPatchBankSlots + 1) * nParams, the slot rows then the shadow row
 };
 PartBank gBank[kPatchBankParts];
 OpenPatch* volatile gLive[kPatchBankParts];
+// The rows of every bank, in the SDRAM (as the patch scratch), not on the heap: on the device a short heap gave an empty bank and the
+// Patch FX did nothing without a word. Worst case, 16 slots plus the shadow row of the engine with the most parameters (kMaxParams):
+// 3 x 17 x 84 floats = 17,136 B. A part always uses the first (kPatchBankSlots + 1) * nParams floats of its block.
+OPEN_EXTERNAL_RAM float gBankVals[kPatchBankParts][size_t(kPatchBankSlots + 1) * size_t(kMaxParams)];
 
 bool partOk(int part)
 {
@@ -881,17 +926,20 @@ void patchBankPreload(int part, Patch& patch, PatchStore& workspace)
     OpenPatchStore& st = static_cast<OpenPatchStore&>(workspace);
     const EngineDef* def = op.getDef();
     const int n = op.paramCount();
+    OPEN_LOCK_AUDIO();
+    gBank[part] = PartBank(); // retire the old bank: its rows are rewritten below and the audio callback must not read them meanwhile
+    OPEN_UNLOCK_AUDIO();
     PartBank nb;
     nb.typeId = op.typeId();
     nb.nParams = n;
-    if (def && n > 0)
+    if (def && n > 0 && n <= kMaxParams)
     {
-        nb.vals = new (std::nothrow) float[size_t(kPatchBankSlots + 1) * size_t(n)];
+        nb.vals = gBankVals[part];
     }
     if (nb.vals)
     {
         ScratchLease sc;
-        for (int i = 0; sc && i < kPatchBankSlots; i++) // no buffers: an empty bank, the FX does nothing
+        for (int i = 0; sc && i < kPatchBankSlots; i++) // no scratch: an empty bank, the FX does nothing
         {
             char name[8];
             patchSlotName(part, i, name);
@@ -904,9 +952,8 @@ void patchBankPreload(int part, Patch& patch, PatchStore& workspace)
         }
     }
     OPEN_LOCK_AUDIO();
-    std::swap(gBank[part], nb);
+    gBank[part] = nb;
     OPEN_UNLOCK_AUDIO();
-    delete[] nb.vals; // the previous bank
 }
 
 void patchBankToSlotZero(int part)

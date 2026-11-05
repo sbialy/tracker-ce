@@ -32,6 +32,11 @@ class OpenPatch final : public Patch
   public:
     OpenPatch(int typeId, const InstrumentType* type);
 
+    // The object (about 3 KB) lives in a small pool in the SDRAM (open_cold.cpp), not on the heap: on the device a short heap
+    // failed the allocation and the project load faulted. Main thread only. A pool that is full falls back to the heap.
+    static void* operator new(size_t n);
+    static void operator delete(void* p) noexcept;
+
     const EngineDef* getDef() const { return def; }
     int paramCount() const { return count; }
 

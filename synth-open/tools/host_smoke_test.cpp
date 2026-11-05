@@ -492,13 +492,37 @@ int main() {
       walkSlots(walk);
       check(walk, "device files: preload has slots 1..3, the editor walks 1 2 3 4 3 0 2 0 with no error");
       // the device error: no 8 KB block left on the heap, every slot select gave kError ("Error loading slot")
-      gShortHeap = 4096;   // the FX bank of a VAP part (17 x 60 floats, 4080 B) still fits, the old 8 KB read buffer does not
+      // Patch FX bank populated: slots 1..3 apply and put exactly the values of their file into the live patch, slot 0 puts the edited ones back
+      auto* livePatch = static_cast<open::OpenPatch*>(live.get());
+      auto bankPopulated = [&](const char* tag) {
+        bool ok = true;
+        float edited[open::kMaxParams], got[open::kMaxParams], want[open::kMaxParams];
+        livePatch->getValuesRaw(edited);
+        int differ = 0;
+        for (int sl : {1, 2, 3}) {
+          open::PatchData pd; const auto& v = mw->files[sl == 1 ? "0-1.patch" : sl == 2 ? "0-2.patch" : "0-3.patch"];
+          ok = ok && open::decodePatch(v.data(), v.size(), pd) && open::patchBankApply(0, sl);
+          livePatch->getValuesRaw(got); livePatch->valuesFromData(pd, want);
+          const bool same = std::memcmp(got, want, size_t(livePatch->paramCount()) * sizeof(float)) == 0;
+          if (!same) printf("  %s: slot %d applied values differ from its file\n", tag, sl);
+          ok = ok && same;
+          differ += std::memcmp(got, edited, size_t(livePatch->paramCount()) * sizeof(float)) != 0;
+        }
+        ok = ok && open::patchBankApply(0, 0);
+        livePatch->getValuesRaw(got);
+        ok = ok && std::memcmp(got, edited, size_t(livePatch->paramCount()) * sizeof(float)) == 0 && differ > 0;
+        if (!ok) printf("  %s: the Patch FX bank is empty or wrong (applied %d of 3 differ from slot 0)\n", tag, differ);
+        return ok;
+      };
+      gShortHeap = 4096;   // the old 8 KB read buffer does not fit (the FX bank of a VAP part, 17 x 60 floats = 4080 B, still did)
       bool shortWalk = ws->loadPatch("0", *live, true);
       open::patchBankToSlotZero(0);
       open::patchBankPreload(0, *live, *ws);
       for (int sl : {1, 2, 3}) shortWalk = shortWalk && open::patchBankApply(0, sl);
       open::patchBankApply(0, 0);
       if (!shortWalk) printf("  short heap: load or preload failed\n");
+      const bool fxPop4k = bankPopulated("4 KB cap");
+      shortWalk = shortWalk && fxPop4k;
       walkSlots(shortWalk);
       auto saved = ws->createPatch(int(InstrumentTypeId::kVASynth));
       const bool sv = ws->savePatch("short", *live), ld = ws->loadPatch("short", *saved, true), rv = open::patchBankRevert(0, *live, *ws);
@@ -507,6 +531,13 @@ int main() {
       mw->files.erase("short.patch");
       gShortHeap = 0;
       check(shortWalk, "device files, no heap block over 4 KB: load, preload, walk, save and revert still work");
+      check(fxPop4k, "device files, no heap block over 4 KB: Patch FX bank is populated after load (slots 1..3 apply their file values)");
+      // the bank must not touch the heap at all: with nothing above 512 B it is still built
+      gShortHeap = 512;
+      open::patchBankToSlotZero(0);
+      open::patchBankPreload(0, *live, *ws);
+      check(bankPopulated("512 B cap"), "device files, no heap block over 512 B: Patch FX bank is still populated (rows are in SDRAM)");
+      gShortHeap = 0;
       open::SlotNames nm;
       const bool names = open::patchNamesRead(0, *ws, nm) && std::strcmp(nm.name[1], "Brass Tacks") == 0 && std::strcmp(nm.name[2], "M1 Organ") == 0 &&
                          std::strcmp(nm.name[3], "Ratio") == 0 && std::strcmp(nm.name[4], "Ratio") == 0;
