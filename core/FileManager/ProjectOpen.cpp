@@ -348,6 +348,9 @@ void ProjectOpen::openProjectFinish()
                                                                cWorkspacePatternsMetadataFilePath);
     //------------ synth patches
 
+#ifdef FEATURE_SYNTH_OPEN
+    bool patchesCopied = true;
+#endif
 #if FILEMANAGER_HANDLE_SYNTH == 1
     snprintf(srcFilePath,
              pathSize,
@@ -356,11 +359,9 @@ void ProjectOpen::openProjectFinish()
              newFileManager.getCurrentProjectName());
 
 #ifdef FEATURE_SYNTH_OPEN
-    if (!newFileManager.getSynth()->copyWorkspacePatches(srcFilePath, cWorkspacePath))
-    {
-        operationError(); // the project is not loaded with half its patch files
-        return;
-    }
+    // The copy replaces files whole and is safe to run again: one more try for a card error that was only a hiccup
+    patchesCopied = newFileManager.getSynth()->copyWorkspacePatches(srcFilePath, cWorkspacePath) ||
+                    newFileManager.getSynth()->copyWorkspacePatches(srcFilePath, cWorkspacePath);
 #else
     newFileManager.getSynth()->copyWorkspacePatches(srcFilePath, cWorkspacePath);
 #endif
@@ -371,7 +372,16 @@ void ProjectOpen::openProjectFinish()
     newFileManager.setStatus(fmIdle);
     newFileManager.setCurrentOperation(fmNoOperation);
 
+#ifdef FEATURE_SYNTH_OPEN
+    // The audio engine is still stopped here and stays so until the load below has put a whole project in place (it restarts it).
+    // A bank copy that failed twice leaves the Workspace with some of the project's patches: not a project to load (a save would
+    // then prune the missing slots from the project folder), and not a reason to restart audio on the old runtime content with the
+    // new project's settings in mtProject (what operationError does). The project in the Projects folder is untouched: this ends
+    // in the empty project of the open fallback below, a new open can try again.
+    if (!patchesCopied || !newFileManager.openProjectFromWorkspace())
+#else
     if (!newFileManager.openProjectFromWorkspace())
+#endif
     {
         newFileManager.createNewProjectInWorkspace();
         newFileManager.openProjectFromWorkspace();
