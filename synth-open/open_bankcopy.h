@@ -40,15 +40,16 @@ bool copyPartBank(Ops& ops, int part, const std::string& srcDir, const std::stri
     {
         const std::string file = bankFileName(part, i);
         const std::string src = srcDir + "\\" + file;
-        std::string from = src;
+        const std::string* from = &src;
+        std::string bak; // only set when the source file is gone: the copy then comes from <file>.bak
         Presence p = ops.stat(src);
         if (p == Presence::kAbsent)
         {
-            const std::string bak = src + ".bak";
+            bak = src + ".bak";
             const Presence b = ops.stat(bak);
             if (b == Presence::kPresent)
             {
-                from = bak;
+                from = &bak;
                 p = Presence::kPresent;
             }
             else if (b == Presence::kUnknown)
@@ -68,7 +69,7 @@ bool copyPartBank(Ops& ops, int part, const std::string& srcDir, const std::stri
             }
             continue;
         }
-        if (!ops.copyFile(from, dstDir + "\\" + file))
+        if (!ops.copyFile(*from, dstDir + "\\" + file))
         {
             return false;
         }
